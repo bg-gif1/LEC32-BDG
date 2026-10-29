@@ -1670,6 +1670,77 @@ OSStatus AudioConverterFillComplexBuffer(
         LC32_AUDIO_U32((uintptr_t)outPacketDescription));
 }
 
+OSStatus AudioConverterReset(AudioConverterRef inAudioConverter) {
+    if(!inAudioConverter) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioConverterReset,
+        LC32_AUDIO_U32((uintptr_t)inAudioConverter));
+}
+
+OSStatus AudioConverterNewSpecific(
+        const AudioStreamBasicDescription *inSourceFormat,
+        const AudioStreamBasicDescription *inDestinationFormat,
+        UInt32 inNumberClassDescriptions,
+        const AudioClassDescription *inClassDescriptions,
+        AudioConverterRef *outAudioConverter) {
+    (void)inNumberClassDescriptions;
+    (void)inClassDescriptions;
+    return AudioConverterNew(
+        inSourceFormat, inDestinationFormat, outAudioConverter);
+}
+
+OSStatus AudioConverterGetPropertyInfo(
+        AudioConverterRef inAudioConverter,
+        AudioConverterPropertyID inPropertyID,
+        UInt32 *outSize,
+        Boolean *outWritable) {
+    if(!inAudioConverter) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioConverterGetPropertyInfo,
+        LC32_AUDIO_U32((uintptr_t)inAudioConverter),
+        LC32_AUDIO_U32(inPropertyID),
+        LC32_AUDIO_U32((uintptr_t)outSize),
+        LC32_AUDIO_U32((uintptr_t)outWritable));
+}
+
+OSStatus AudioConverterGetProperty(
+        AudioConverterRef inAudioConverter,
+        AudioConverterPropertyID inPropertyID,
+        UInt32 *ioPropertyDataSize,
+        void *outPropertyData) {
+    if(!inAudioConverter || !ioPropertyDataSize) return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioConverterGetProperty,
+        LC32_AUDIO_U32((uintptr_t)inAudioConverter),
+        LC32_AUDIO_U32(inPropertyID),
+        LC32_AUDIO_U32((uintptr_t)ioPropertyDataSize),
+        LC32_AUDIO_U32((uintptr_t)outPropertyData));
+}
+
+OSStatus AudioConverterSetProperty(
+        AudioConverterRef inAudioConverter,
+        AudioConverterPropertyID inPropertyID,
+        UInt32 inPropertyDataSize,
+        const void *inPropertyData) {
+    if(!inAudioConverter || (inPropertyDataSize && !inPropertyData))
+        return kAudio_ParamError;
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioConverterSetProperty,
+        LC32_AUDIO_U32((uintptr_t)inAudioConverter),
+        LC32_AUDIO_U32(inPropertyID),
+        LC32_AUDIO_U32(inPropertyDataSize),
+        LC32_AUDIO_U32((uintptr_t)inPropertyData));
+}
+    return (OSStatus)LC32_AUDIO_CALL(
+        LC32AudioToolboxOpAudioConverterFillComplexBuffer,
+        LC32_AUDIO_U32((uintptr_t)inAudioConverter),
+        LC32_AUDIO_U32((uintptr_t)inInputDataProc),
+        LC32_AUDIO_U32((uintptr_t)inInputDataProcUserData),
+        LC32_AUDIO_U32((uintptr_t)ioOutputDataPacketSize),
+        LC32_AUDIO_U32((uintptr_t)outOutputData),
+        LC32_AUDIO_U32((uintptr_t)outPacketDescription));
+}
+
 OSStatus AudioQueueFlush(AudioQueueRef inAQ) {
     if(!inAQ) return kAudio_ParamError;
     return (OSStatus)LC32_AUDIO_CALL(LC32AudioToolboxOpAudioQueueFlush,
