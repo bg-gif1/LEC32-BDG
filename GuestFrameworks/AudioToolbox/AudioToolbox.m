@@ -774,81 +774,76 @@ static void *LC32SilentAudioPumpMain(void *context) {
     Float64 sampleTime = 0;
     while(!__atomic_load_n(&pump->unit->stopRequested,
                            __ATOMIC_ACQUIRE)) {
-        if(!__atomic_load_n(&pump->unit->started, __ATOMIC_ACQUIRE)) {
-            const struct timespec idleInterval = {
-                .tv_sec = 0,
-                .tv_nsec = 1000000L,
-            };
-            (void)nanosleep(&idleInterval, NULL);
-            continue;
-        }
-        LC32SilentAudioResetBufferList(pump);
-        AudioUnitRenderActionFlags actionFlags = 0;
-        AudioTimeStamp timeStamp = {0};
-        timeStamp.mSampleTime = sampleTime;
-        timeStamp.mFlags = kAudioTimeStampSampleTimeValid;
-        const size_t notifyCount =
-            LC32SilentAudioSnapshotRenderNotifies(pump);
-        LC32SilentAudioInvokeRenderNotifies(
-            pump->renderNotifySnapshot, notifyCount, &actionFlags,
-            kAudioUnitRenderAction_PreRender, &timeStamp, 0,
-            pump->numberFrames, pump->bufferList);
-        actionFlags &= ~(kAudioUnitRenderAction_PreRender |
-            kAudioUnitRenderAction_PostRender |
-            kAudioUnitRenderAction_PostRenderError);
-        const OSStatus renderStatus = pump->sourceMixer
-            ? LC32SilentAudioRenderMixer(
-                pump, &actionFlags, &timeStamp)
-            : pump->callback.inputProc(
-                pump->callback.inputProcRefCon,
-                &actionFlags, &timeStamp, 0, pump->numberFrames,
-                pump->bufferList);
-        if(renderStatus == noErr) {
-            LC32SilentAudioApplyOutputVolume(pump, &actionFlags);
-        }
-        AudioUnitRenderActionFlags postFlags =
-            kAudioUnitRenderAction_PostRender;
-        if(renderStatus != noErr)
-            postFlags |= kAudioUnitRenderAction_PostRenderError;
-        LC32SilentAudioInvokeRenderNotifies(
-            pump->renderNotifySnapshot, notifyCount, &actionFlags,
-            postFlags, &timeStamp, 0, pump->numberFrames,
-            pump->bufferList);
-        sampleTime += pump->numberFrames;
-
-        BOOL hostPaced = NO;
-        const uint32_t hostOutputToken = __atomic_load_n(
-            &pump->unit->hostOutputToken, __ATOMIC_ACQUIRE);
-        if(hostOutputToken && __atomic_load_n(
-                &pump->unit->hostOutputHealthy, __ATOMIC_ACQUIRE)) {
-            const BOOL silence = renderStatus != noErr ||
-                (actionFlags & kAudioUnitRenderAction_OutputIsSilence) != 0;
-            const OSStatus submitStatus = (OSStatus)LC32_AUDIO_CALL(
-                LC32AudioToolboxOpRemoteIOOutputSubmit,
-                LC32_AUDIO_U32(hostOutputToken),
-                LC32_AUDIO_U32((uintptr_t)pump->bufferList),
-                LC32_AUDIO_U32(pump->numberFrames),
-                LC32_AUDIO_U32(silence));
-            if(submitStatus == noErr) {
-                /* Waiting for a returned native AudioQueue buffer supplies
-                 * the pacing for the next render quantum. */
-                hostPaced = YES;
-            } else {
-                __atomic_store_n(&pump->unit->hostOutputHealthy, 0,
-                    __ATOMIC_RELEASE);
-#if LC32_TRACE_AUDIO_OUTPUT
-                fprintf(stderr,
-                    "LC32: RemoteIO output submit failed: status=%d\n",
-                    (int)submitStatus);
-#endif
+        @autoreleasepool {
+            if(!__atomic_load_n(&pump->unit->started, __ATOMIC_ACQUIRE)) {
+                const struct timespec idleInterval = {
+                    .tv_sec = 0,
+                    .tv_nsec = 1000000L,
+                };
+                (void)nanosleep(&idleInterval, NULL);
+                continue;
             }
-        }
-        if(hostPaced) continue;
+            LC32SilentAudioResetBufferList(pump);
+            AudioUnitRenderActionFlags actionFlags = 0;
+            AudioTimeStamp timeStamp = {0};
+            timeStamp.mSampleTime = sampleTime;
+            timeStamp.mFlags = kAudioTimeStampSampleTimeValid;
+            const size_t notifyCount =
+                LC32SilentAudioSnapshotRenderNotifies(pump);
+            LC32SilentAudioInvokeRenderNotifies(
+                pump->renderNotifySnapshot, notifyCount, &actionFlags,
+                kAudioUnitRenderAction_PreRender, &timeStamp, 0,
+                pump->numberFrames, pump->bufferList);
+            actionFlags &= ~(kAudioUnitRenderAction_PreRender |
+                kAudioUnitRenderAction_PostRender |
+                kAudioUnitRenderAction_PostRenderError);
+            const OSStatus renderStatus = pump->sourceMixer
+                ? LC32SilentAudioRenderMixer(
+                    pump, &actionFlags, &timeStamp)
+                : pump->callback.inputProc(
+                    pump->callback.inputProcRefCon,
+                    &actionFlags, &timeStamp, 0, pump->numberFrames,
+                    pump->bufferList);
+            if(renderStatus == noErr) {
+                LC32SilentAudioApplyOutputVolume(pump, &actionFlags);
+            }
+            AudioUnitRenderActionFlags postFlags =
+                kAudioUnitRenderAction_PostRender;
+            if(renderStatus != noErr)
+                postFlags |= kAudioUnitRenderAction_PostRenderError;
+            LC32SilentAudioInvokeRenderNotifies(
+                pump->renderNotifySnapshot, notifyCount, &actionFlags,
+                postFlags, &timeStamp, 0, pump->numberFrames,
+                pump->bufferList);
+            sampleTime += pump->numberFrames;
 
-        struct timespec remaining = pump->interval;
-        while(!__atomic_load_n(&pump->unit->stopRequested,
-                               __ATOMIC_ACQUIRE) &&
-              nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {}
+            BOOL hostPaced = NO;
+            const uint32_t hostOutputToken = __atomic_load_n(
+                &pump->unit->hostOutputToken, __ATOMIC_ACQUIRE);
+            if(hostOutputToken && __atomic_load_n(
+                    &pump->unit->hostOutputHealthy, __ATOMIC_ACQUIRE)) {
+                const BOOL silence = renderStatus != noErr ||
+                    (actionFlags & kAudioUnitRenderAction_OutputIsSilence) != 0;
+                const OSStatus submitStatus = (OSStatus)LC32_AUDIO_CALL(
+                    LC32AudioToolboxOpRemoteIOOutputSubmit,
+                    LC32_AUDIO_U32(hostOutputToken),
+                    LC32_AUDIO_U32((uintptr_t)pump->bufferList),
+                    LC32_AUDIO_U32(pump->numberFrames),
+                    LC32_AUDIO_U32(silence));
+                if(submitStatus == noErr) {
+                    hostPaced = YES;
+                } else {
+                    __atomic_store_n(&pump->unit->hostOutputHealthy, 0,
+                        __ATOMIC_RELEASE);
+                }
+            }
+            if(hostPaced) continue;
+
+            struct timespec remaining = pump->interval;
+            while(!__atomic_load_n(&pump->unit->stopRequested,
+                                   __ATOMIC_ACQUIRE) &&
+                  nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {}
+        }
     }
     LC32SilentAudioDestroyPump(pump);
     return NULL;
