@@ -102,6 +102,10 @@ typedef enum : uint32_t {
     LC32AudioToolboxOpAudioQueueEnqueueBufferWithParameters = 61,
     LC32AudioToolboxOpAudioQueueSetOfflineRenderFormat = 62,
     LC32AudioToolboxOpAudioQueueOfflineRender = 63,
+    LC32AudioToolboxOpAudioConverterReset = 64,
+    LC32AudioToolboxOpAudioConverterGetPropertyInfo = 65,
+    LC32AudioToolboxOpAudioConverterGetProperty = 66,
+    LC32AudioToolboxOpAudioConverterSetProperty = 67,
 } LC32AudioToolboxOpcode;
 
 #endif
