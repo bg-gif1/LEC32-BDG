@@ -393,26 +393,26 @@ public:
         kAudioBufferListOffset + kAudioBufferListBytes;
 
     GuestAudioConverterCallbackStorage() {
-        allocation_ = AllocateGuestCallbackBytes(kTotalBytes);
-        if(!allocation_ ||
-           static_cast<uint64_t>(allocation_) + kTotalBytes >
-               static_cast<uint64_t>(UINT32_MAX) + 1) {
-            if(allocation_) guest_free(allocation_);
-            allocation_ = 0;
-            return;
+        static thread_local u32 cachedAllocation = 0;
+        if(!cachedAllocation) {
+            cachedAllocation = AllocateGuestCallbackBytes(kTotalBytes);
+            if(cachedAllocation &&
+               static_cast<uint64_t>(cachedAllocation) + kTotalBytes >
+                   static_cast<uint64_t>(UINT32_MAX) + 1) {
+                guest_free(cachedAllocation);
+                cachedAllocation = 0;
+            }
         }
+        allocation_ = cachedAllocation;
+        if(!allocation_) return;
 
         std::array<uint8_t, kTotalBytes> zero = {};
         if(!WriteGuestBytes(allocation_, zero.size(), zero.data())) {
-            guest_free(allocation_);
             allocation_ = 0;
         }
     }
 
-    ~GuestAudioConverterCallbackStorage() {
-        if(allocation_ && Dynarmic_guest_thread_is_registered())
-            guest_free(allocation_);
-    }
+    ~GuestAudioConverterCallbackStorage() = default;
 
     explicit operator bool() const { return allocation_ != 0; }
     u32 packetCount() const {
