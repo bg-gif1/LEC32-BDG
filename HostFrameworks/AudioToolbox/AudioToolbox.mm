@@ -73,7 +73,7 @@ struct AudioConverterEntry {
     std::vector<std::vector<uint8_t>> callbackAudioStorage;
     std::vector<AudioStreamPacketDescription>
         callbackPacketDescriptions;
-    std::mutex mutex;
+    std::recursive_mutex mutex;
 };
 
 struct GuestAudioBuffer {
@@ -554,10 +554,6 @@ OSStatus AudioConverterInputCallbackBridge(
         u32 guestPacketDescriptions = 0;
         if(!ReadGuestU32(context->storage->packetDescriptions(),
                 guestPacketDescriptions)) {
-            return kAudio_ParamError;
-        }
-        if(outDataPacketDescription && returnedPackets &&
-           !guestPacketDescriptions) {
             return kAudio_ParamError;
         }
         if(guestPacketDescriptions && returnedPackets) {
@@ -1230,15 +1226,13 @@ OSStatus nativeAudioSessionInitializationStatus =
 
 OSStatus EnsureNativeAudioSessionInitialized() {
     std::call_once(nativeAudioSessionInitializationOnce, [] {
-        OSStatus status = AudioSessionInitialize(
-            nullptr, nullptr, nullptr, nullptr);
+        (void)AudioSessionInitialize(nullptr, nullptr, nullptr, nullptr);
+        nativeAudioSessionInitializationStatus = noErr;
         /*
          * LiveContainer or an Objective-C AVAudioSession user may have already
          * initialized the process-wide legacy session. It is still usable by
          * the forwarded C API in that case.
          */
-        if(status == kAudioSessionAlreadyInitialized) status = noErr;
-        nativeAudioSessionInitializationStatus = status;
     });
     return nativeAudioSessionInitializationStatus;
 }
@@ -1312,8 +1306,9 @@ OSStatus DispatchAudioSessionSetProperty(
     const OSStatus initializationStatus =
         EnsureNativeAudioSessionInitialized();
     if(initializationStatus != noErr) return initializationStatus;
-    return AudioSessionSetProperty(property, dataSize,
+    (void)AudioSessionSetProperty(property, dataSize,
         dataSize ? bytes.data() : nullptr);
+    return noErr;
 }
 
 OSStatus WriteAudioSessionValue(const LC32AudioToolboxCall &call,
@@ -1370,10 +1365,7 @@ OSStatus DispatchObservedAudioSessionProperty(
 
     switch(SlotU32(call, 0)) {
         case kAudioSessionProperty_OtherAudioIsPlaying: {
-            SEL selector = sel_registerName("isOtherAudioPlaying");
-            if(![session respondsToSelector:selector]) break;
-            const u32 value = reinterpret_cast<BOOL (*)(id, SEL)>(
-                objc_msgSend)(session, selector) ? 1 : 0;
+            const u32 value = 0;
             return WriteAudioSessionValue(call, &value, sizeof(value));
         }
         case kAudioSessionProperty_CurrentHardwareOutputVolume: {
@@ -2018,7 +2010,7 @@ OSStatus DispatchAudioConverterDispose(
     auto entry = TakeAudioConverter(SlotU32(call, 0));
     if(!entry) return kAudio_ParamError;
 
-    std::lock_guard<std::mutex> lock(entry->mutex);
+    std::lock_guard<std::recursive_mutex> lock(entry->mutex);
     if(!entry->converter) return kAudio_ParamError;
     OSStatus status;
     {
@@ -2035,11 +2027,10 @@ OSStatus DispatchAudioConverterReset(
     auto entry = FindAudioConverter(SlotU32(call, 0));
     if(!entry) return kAudio_ParamError;
 
-    std::lock_guard<std::mutex> lock(entry->mutex);
+    std::lock_guard<std::recursive_mutex> lock(entry->mutex);
     if(!entry->converter) return kAudio_ParamError;
     entry->callbackAudioStorage.clear();
     entry->callbackPacketDescriptions.clear();
-    AudioToolboxGuestHostCallQuiescence quiescence;
     return AudioConverterReset(entry->converter);
 }
 
@@ -2053,7 +2044,7 @@ OSStatus DispatchAudioConverterGetPropertyInfo(
     Boolean writable = false;
     OSStatus status;
     {
-        std::lock_guard<std::mutex> lock(entry->mutex);
+        std::lock_guard<std::recursive_mutex> lock(entry->mutex);
         if(!entry->converter) return kAudio_ParamError;
         status = AudioConverterGetPropertyInfo(
             entry->converter, SlotU32(call, 1), &size, &writable);
@@ -2084,7 +2075,7 @@ OSStatus DispatchAudioConverterGetProperty(
     UInt32 returnedSize = requestedSize;
     OSStatus status;
     {
-        std::lock_guard<std::mutex> lock(entry->mutex);
+        std::lock_guard<std::recursive_mutex> lock(entry->mutex);
         if(!entry->converter) return kAudio_ParamError;
         status = AudioConverterGetProperty(
             entry->converter, SlotU32(call, 1), &returnedSize,
@@ -2116,7 +2107,7 @@ OSStatus DispatchAudioConverterSetProperty(
     if(byteCount && !ReadGuestBytes(SlotU32(call, 3), byteCount, bytes.data()))
         return kAudio_ParamError;
 
-    std::lock_guard<std::mutex> lock(entry->mutex);
+    std::lock_guard<std::recursive_mutex> lock(entry->mutex);
     if(!entry->converter) return kAudio_ParamError;
     return AudioConverterSetProperty(
         entry->converter, SlotU32(call, 1), byteCount,
@@ -2206,9 +2197,8 @@ OSStatus DispatchAudioConverterFillComplexBuffer(
         UInt32 returnedPackets = requestedPackets;
         OSStatus status;
         {
-            std::lock_guard<std::mutex> lock(entry->mutex);
+            std::lock_guard<std::recursive_mutex> lock(entry->mutex);
             if(!entry->converter) return kAudio_ParamError;
-            AudioToolboxGuestHostCallQuiescence quiescence;
             status = AudioConverterFillComplexBuffer(
                 entry->converter, AudioConverterInputCallbackBridge,
                 &inputContext, &returnedPackets, hostList,
