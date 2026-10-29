@@ -2029,6 +2029,100 @@ OSStatus DispatchAudioConverterDispose(
     return status;
 }
 
+OSStatus DispatchAudioConverterReset(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 1)) return kAudio_ParamError;
+    auto entry = FindAudioConverter(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    if(!entry->converter) return kAudio_ParamError;
+    entry->callbackAudioStorage.clear();
+    entry->callbackPacketDescriptions.clear();
+    AudioToolboxGuestHostCallQuiescence quiescence;
+    return AudioConverterReset(entry->converter);
+}
+
+OSStatus DispatchAudioConverterGetPropertyInfo(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioConverter(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    UInt32 size = 0;
+    Boolean writable = false;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->converter) return kAudio_ParamError;
+        status = AudioConverterGetPropertyInfo(
+            entry->converter, SlotU32(call, 1), &size, &writable);
+    }
+    if(status != noErr) return status;
+    if((SlotU32(call, 2) && !WriteGuestU32(SlotU32(call, 2), size)) ||
+       (SlotU32(call, 3) && !WriteGuestBytes(
+            SlotU32(call, 3), sizeof(writable), &writable))) {
+        return kAudio_ParamError;
+    }
+    return noErr;
+}
+
+OSStatus DispatchAudioConverterGetProperty(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4) || !SlotU32(call, 2))
+        return kAudio_ParamError;
+    auto entry = FindAudioConverter(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    u32 requestedSize = 0;
+    if(!ReadGuestU32(SlotU32(call, 2), requestedSize) ||
+       requestedSize > kMaximumPropertyBytes ||
+       (requestedSize && !SlotU32(call, 3))) {
+        return kAudio_ParamError;
+    }
+    std::vector<uint8_t> bytes(requestedSize ? requestedSize : 1);
+    UInt32 returnedSize = requestedSize;
+    OSStatus status;
+    {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        if(!entry->converter) return kAudio_ParamError;
+        status = AudioConverterGetProperty(
+            entry->converter, SlotU32(call, 1), &returnedSize,
+            requestedSize ? bytes.data() : nullptr);
+    }
+    if(!WriteGuestU32(SlotU32(call, 2), returnedSize))
+        return kAudio_ParamError;
+    if(status == noErr && returnedSize) {
+        if(returnedSize > requestedSize ||
+           !WriteGuestBytes(SlotU32(call, 3), returnedSize, bytes.data())) {
+            return kAudio_ParamError;
+        }
+    }
+    return status;
+}
+
+OSStatus DispatchAudioConverterSetProperty(
+        const LC32AudioToolboxCall &call) {
+    if(!RequireSlots(call, 4)) return kAudio_ParamError;
+    auto entry = FindAudioConverter(SlotU32(call, 0));
+    if(!entry) return kAudio_ParamError;
+
+    const u32 byteCount = SlotU32(call, 2);
+    if(byteCount > kMaximumPropertyBytes ||
+       (byteCount && !SlotU32(call, 3))) {
+        return kAudio_ParamError;
+    }
+    std::vector<uint8_t> bytes(byteCount ? byteCount : 1);
+    if(byteCount && !ReadGuestBytes(SlotU32(call, 3), byteCount, bytes.data()))
+        return kAudio_ParamError;
+
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    if(!entry->converter) return kAudio_ParamError;
+    return AudioConverterSetProperty(
+        entry->converter, SlotU32(call, 1), byteCount,
+        byteCount ? bytes.data() : nullptr);
+}
+
 OSStatus DispatchAudioConverterFillComplexBuffer(
         const LC32AudioToolboxCall &call) {
     if(!RequireSlots(call, 6) || !SlotU32(call, 1) ||
@@ -4065,6 +4159,18 @@ extern "C" u32 LC32_AudioToolbox_Dispatch(u32 opcode, u32 guestCall, u32) {
         case LC32AudioToolboxOpAudioConverterFillComplexBuffer:
             return static_cast<u32>(
                 DispatchAudioConverterFillComplexBuffer(call));
+        case LC32AudioToolboxOpAudioConverterReset:
+            return static_cast<u32>(
+                DispatchAudioConverterReset(call));
+        case LC32AudioToolboxOpAudioConverterGetPropertyInfo:
+            return static_cast<u32>(
+                DispatchAudioConverterGetPropertyInfo(call));
+        case LC32AudioToolboxOpAudioConverterGetProperty:
+            return static_cast<u32>(
+                DispatchAudioConverterGetProperty(call));
+        case LC32AudioToolboxOpAudioConverterSetProperty:
+            return static_cast<u32>(
+                DispatchAudioConverterSetProperty(call));
         case LC32AudioToolboxOpAudioQueueNewInput:
             return static_cast<u32>(DispatchAudioQueueNewInput(call));
         case LC32AudioToolboxOpAudioQueueNewOutput:
