@@ -1044,9 +1044,19 @@ static OSStatus LC32AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID i
     if(!silent || (inDataSize && !inData)) return kAudio_ParamError;
     pthread_mutex_lock(&silent->mutex);
 
+    if(inID == kAudioUnitProperty_MaximumFramesPerSlice ||
+       inID == kAudioUnitProperty_ShouldAllocateBuffer ||
+       inID == kAudioOutputUnitProperty_EnableIO ||
+       inID == kAudioUnitProperty_MeteringMode) {
+        pthread_mutex_unlock(&silent->mutex);
+        return noErr;
+    }
+
     if(silent->kind == LC32SilentAudioUnitKindRemoteIO) {
         if(inID == kAudioUnitProperty_StreamFormat &&
-           inScope == kAudioUnitScope_Input && inElement == 0 &&
+           (inScope == kAudioUnitScope_Input ||
+            inScope == kAudioUnitScope_Output ||
+            inScope == kAudioUnitScope_Global) &&
            inDataSize == sizeof(silent->format)) {
             if(silent->initialized || silent->renderThreadJoinable) {
                 pthread_mutex_unlock(&silent->mutex);
@@ -1060,7 +1070,9 @@ static OSStatus LC32AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID i
             return noErr;
         }
         if(inID == kAudioUnitProperty_SetRenderCallback &&
-           inScope == kAudioUnitScope_Global && inElement == 0 &&
+           (inScope == kAudioUnitScope_Global ||
+            inScope == kAudioUnitScope_Input ||
+            inScope == kAudioUnitScope_Output) &&
            inDataSize == sizeof(silent->renderCallback)) {
             if(silent->initialized || silent->renderThreadJoinable) {
                 pthread_mutex_unlock(&silent->mutex);
@@ -1121,6 +1133,23 @@ static OSStatus LC32AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID i
         }
     } else if(silent->kind ==
             LC32SilentAudioUnitKindSpatialMixer) {
+        if(inID == kAudioUnitProperty_StreamFormat &&
+           inDataSize == sizeof(AudioStreamBasicDescription)) {
+            if(inScope == kAudioUnitScope_Input &&
+               inElement < LC32SilentAudioMaximumMixerBuses) {
+                memcpy(&silent->mixerInputFormats[inElement], inData,
+                    sizeof(AudioStreamBasicDescription));
+                pthread_mutex_unlock(&silent->mutex);
+                return noErr;
+            }
+            if(inScope == kAudioUnitScope_Output ||
+               inScope == kAudioUnitScope_Global) {
+                memcpy(&silent->format, inData,
+                    sizeof(AudioStreamBasicDescription));
+                pthread_mutex_unlock(&silent->mutex);
+                return noErr;
+            }
+        }
         if(inID == kAudioUnitProperty_ElementCount &&
            inScope == kAudioUnitScope_Input && inElement == 0 &&
            inDataSize == sizeof(UInt32)) {
@@ -1143,7 +1172,8 @@ static OSStatus LC32AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID i
             return noErr;
         }
         if(inID == kAudioUnitProperty_SetRenderCallback &&
-           inScope == kAudioUnitScope_Input &&
+           (inScope == kAudioUnitScope_Input ||
+            inScope == kAudioUnitScope_Global) &&
            inElement < silent->mixerInputBusCount &&
            inDataSize == sizeof(AURenderCallbackStruct)) {
             memcpy(&silent->mixerRenderCallbacks[inElement], inData,
