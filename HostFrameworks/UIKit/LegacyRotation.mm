@@ -339,6 +339,8 @@ void Swizzle(Class cls, SEL original, SEL replacement) {
 }
 
 BOOL LegacyApplicationStatusBarPolicy(id, SEL) { return NO; }
+void LegacyWindowFinishedFirstHalfRotation(id, SEL, id, id) {}
+void LegacyWindowFinishedFullRotation(id, SEL, id, id, id) {}
 } // namespace
 
 extern "C" bool LC32NativeLegacyRotationEnabled(void) {
@@ -489,6 +491,12 @@ extern "C" void LC32FinishNativeLegacyRotationStartup(void) {
     return configuringLegacyWindow == self || [self lc32_windowOwnsInterfaceOrientationTransform];
 }
 + (void)load {
+    class_addMethod(self,
+        sel_registerName("_finishedFirstHalfRotation:context:"),
+        (IMP)LegacyWindowFinishedFirstHalfRotation, "v@:@@");
+    class_addMethod(self,
+        sel_registerName("_finishedFullRotation:finished:context:"),
+        (IMP)LegacyWindowFinishedFullRotation, "v@:@@@");
     if(!LC32NativeLegacyRotationEnabled()) return;
     // Controller-managed status bars were introduced in iOS 7. Modern UIKit
     // defaults to them even for older guests, losing UIStatusBarHidden and
