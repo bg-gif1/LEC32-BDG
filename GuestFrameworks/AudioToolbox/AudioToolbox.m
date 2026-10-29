@@ -1731,15 +1731,6 @@ OSStatus AudioConverterSetProperty(
         LC32_AUDIO_U32(inPropertyDataSize),
         LC32_AUDIO_U32((uintptr_t)inPropertyData));
 }
-    return (OSStatus)LC32_AUDIO_CALL(
-        LC32AudioToolboxOpAudioConverterFillComplexBuffer,
-        LC32_AUDIO_U32((uintptr_t)inAudioConverter),
-        LC32_AUDIO_U32((uintptr_t)inInputDataProc),
-        LC32_AUDIO_U32((uintptr_t)inInputDataProcUserData),
-        LC32_AUDIO_U32((uintptr_t)ioOutputDataPacketSize),
-        LC32_AUDIO_U32((uintptr_t)outOutputData),
-        LC32_AUDIO_U32((uintptr_t)outPacketDescription));
-}
 
 OSStatus AudioQueueFlush(AudioQueueRef inAQ) {
     if(!inAQ) return kAudio_ParamError;
