@@ -359,7 +359,6 @@ struct PooledNativeGuestJit {
 static std::mutex pooledNativeGuestJitsMutex;
 static std::array<PooledNativeGuestJit, MaxNativeGuestProcessors>
     pooledNativeGuestJits = {};
-static bool pooledNativeGuestJitsPrewarmed = false;
 
 static bool AllocatePooledNativeGuestJit(
         size_t processorId, PooledNativeGuestJit &out) {
@@ -381,76 +380,7 @@ static bool AllocatePooledNativeGuestJit(
     config.wall_clock_cntpct = true;
     config.check_halt_on_memory_access = true;
     config.define_unpredictable_behaviour = true;
-    config.code_cache_size = 4 * 1024 * 1024;
-
-    DynarmicCallbacks32SetPageTable(
-        out.callbacks,
-        sharedHandle.num_page_table_entries,
-        sharedHandle.page_table);
-    if (sharedHandle.page_table != nullptr) {
-        config.page_table = reinterpret_cast<
-            std::array<std::uint8_t *,
-                Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES> *>(
-                    sharedHandle.page_table);
-        config.absolute_offset_page_table = false;
-        config.detect_misaligned_access_via_page_table =
-            16 | 32 | 64 | 128;
-        config.only_detect_misalignment_via_page_table_on_page_boundary =
-            true;
-    }
-
-    try {
-        out.jit = new Dynarmic::A32::Jit(config);
-        out.cpsr = new DynarmicCpsr(out.jit);
-    } catch (const std::exception &exception) {
-        fprintf(stderr,
-            "LC32: native guest JIT creation failed: %s\n",
-            exception.what());
-        if (out.jit != nullptr) {
-            delete out.jit;
-        }
-        DestroyDynarmicCallbacks32(out.callbacks);
-        out = {};
-        return false;
-    }
-
-    DynarmicCallbacks32BindJit(
-        out.callbacks, out.jit, out.cpsr);
-    return true;
-}
-
-struct PooledNativeGuestJit {
-    DynarmicCallbacks32 *callbacks = nullptr;
-    Dynarmic::A32::Jit *jit = nullptr;
-    DynarmicCpsr *cpsr = nullptr;
-};
-
-static std::mutex pooledNativeGuestJitsMutex;
-static std::array<PooledNativeGuestJit, MaxNativeGuestProcessors>
-    pooledNativeGuestJits = {};
-static bool pooledNativeGuestJitsPrewarmed = false;
-
-static bool AllocatePooledNativeGuestJit(
-        size_t processorId, PooledNativeGuestJit &out) {
-    out = {};
-    out.callbacks =
-        CreateDynarmicCallbacks32(sharedHandle.memory);
-    if (out.callbacks == nullptr) {
-        return false;
-    }
-
-    Dynarmic::A32::UserConfig config;
-    config.callbacks =
-        DynarmicCallbacks32UserCallbacks(out.callbacks);
-    config.coprocessors[15] =
-        DynarmicCallbacks32CP15(out.callbacks);
-    config.processor_id = processorId;
-    config.global_monitor = sharedHandle.monitor;
-    config.always_little_endian = false;
-    config.wall_clock_cntpct = true;
-    config.check_halt_on_memory_access = true;
-    config.define_unpredictable_behaviour = true;
-    config.code_cache_size = 4 * 1024 * 1024;
+    config.code_cache_size = 8 * 1024 * 1024;
 
     DynarmicCallbacks32SetPageTable(
         out.callbacks,
@@ -499,19 +429,6 @@ static NativeGuestJit *CreateNativeGuestJit(
     {
         std::lock_guard<std::mutex> lock(
             pooledNativeGuestJitsMutex);
-        if (!pooledNativeGuestJitsPrewarmed) {
-            pooledNativeGuestJitsPrewarmed = true;
-            constexpr size_t kPrewarmCount = 6;
-            for (size_t id = 1;
-                    id <= kPrewarmCount &&
-                    id < MaxNativeGuestProcessors;
-                    ++id) {
-                if (pooledNativeGuestJits[id].jit == nullptr) {
-                    (void)AllocatePooledNativeGuestJit(
-                        id, pooledNativeGuestJits[id]);
-                }
-            }
-        }
         pooled = pooledNativeGuestJits[processorId];
         pooledNativeGuestJits[processorId] = {};
     }
@@ -531,8 +448,6 @@ static NativeGuestJit *CreateNativeGuestJit(
         runtime->callbacks,
         sharedHandle.num_page_table_entries,
         sharedHandle.page_table);
-    runtime->jit->ClearCache();
-    runtime->jit->Reset();
     constexpr Dynarmic::HaltReason kAllHaltReasons =
         LC32HaltReasonSVC |
         LC32HaltReasonRetFromGuest |
@@ -561,6 +476,68 @@ static NativeGuestJit *CreateNativeGuestJit(
         nativeGuestJits.push_back(runtime);
     }
     return runtime;
+}
+
+void DestroyNativeGuestJit(
+        NativeGuestJit *runtime) {
+    if (runtime == nullptr) {
+        return;
+    }
+    {
+        std::unique_lock<std::mutex> lock(
+            nativeGuestJitMutex);
+        nativeGuestJits.erase(std::remove(
+            nativeGuestJits.begin(), nativeGuestJits.end(),
+            runtime), nativeGuestJits.end());
+        nativeGuestJitCondition.wait(lock, [runtime] {
+            return runtime->threadStateUsers == 0;
+        });
+    }
+    if (sharedHandle.monitor != nullptr &&
+            runtime->processorId <
+                MaxNativeGuestProcessors) {
+        sharedHandle.monitor->ClearProcessor(
+            runtime->processorId);
+    }
+    UnregisterGuestVmEpochParticipant(
+        &runtime->vmEpochParticipant);
+
+    const bool shuttingDown =
+        nativeShutdownRequested.load(
+            std::memory_order_acquire) ||
+        guestProcessExitRequested.load(
+            std::memory_order_acquire);
+    bool recycled = false;
+    if (!shuttingDown &&
+            runtime->processorId > 0 &&
+            runtime->processorId < MaxNativeGuestProcessors &&
+            runtime->jit != nullptr) {
+        std::lock_guard<std::mutex> poolLock(
+            pooledNativeGuestJitsMutex);
+        if (pooledNativeGuestJits[runtime->processorId].jit ==
+                nullptr) {
+            pooledNativeGuestJits[runtime->processorId] = {
+                .callbacks = runtime->callbacks,
+                .jit = runtime->jit,
+                .cpsr = runtime->cpsr,
+            };
+            recycled = true;
+        }
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(
+            guestThreadMutex);
+        guestProcessorIdsInUse &=
+            ~(uint64_t{1} << runtime->processorId);
+    }
+
+    if (!recycled) {
+        delete runtime->cpsr;
+        delete runtime->jit;
+        DestroyDynarmicCallbacks32(runtime->callbacks);
+    }
+    delete runtime;
 }
 
 void DestroyNativeGuestJit(
