@@ -540,68 +540,6 @@ void DestroyNativeGuestJit(
     delete runtime;
 }
 
-void DestroyNativeGuestJit(
-        NativeGuestJit *runtime) {
-    if (runtime == nullptr) {
-        return;
-    }
-    {
-        std::unique_lock<std::mutex> lock(
-            nativeGuestJitMutex);
-        nativeGuestJits.erase(std::remove(
-            nativeGuestJits.begin(), nativeGuestJits.end(),
-            runtime), nativeGuestJits.end());
-        nativeGuestJitCondition.wait(lock, [runtime] {
-            return runtime->threadStateUsers == 0;
-        });
-    }
-    if (sharedHandle.monitor != nullptr &&
-            runtime->processorId <
-                MaxNativeGuestProcessors) {
-        sharedHandle.monitor->ClearProcessor(
-            runtime->processorId);
-    }
-    UnregisterGuestVmEpochParticipant(
-        &runtime->vmEpochParticipant);
-
-    const bool shuttingDown =
-        nativeShutdownRequested.load(
-            std::memory_order_acquire) ||
-        guestProcessExitRequested.load(
-            std::memory_order_acquire);
-    bool recycled = false;
-    if (!shuttingDown &&
-            runtime->processorId > 0 &&
-            runtime->processorId < MaxNativeGuestProcessors &&
-            runtime->jit != nullptr) {
-        std::lock_guard<std::mutex> poolLock(
-            pooledNativeGuestJitsMutex);
-        if (pooledNativeGuestJits[runtime->processorId].jit ==
-                nullptr) {
-            pooledNativeGuestJits[runtime->processorId] = {
-                .callbacks = runtime->callbacks,
-                .jit = runtime->jit,
-                .cpsr = runtime->cpsr,
-            };
-            recycled = true;
-        }
-    }
-
-    {
-        std::lock_guard<std::recursive_mutex> lock(
-            guestThreadMutex);
-        guestProcessorIdsInUse &=
-            ~(uint64_t{1} << runtime->processorId);
-    }
-
-    if (!recycled) {
-        delete runtime->cpsr;
-        delete runtime->jit;
-        DestroyDynarmicCallbacks32(runtime->callbacks);
-    }
-    delete runtime;
-}
-
 void JoinNativeGuestJit(
         NativeGuestJit *runtime) {
     if (runtime == nullptr ||
