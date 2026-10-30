@@ -342,7 +342,7 @@ struct PooledNativeGuestJit {
     DynarmicCpsr *cpsr = nullptr;
 };
 
-static constexpr size_t kMaxPooledNativeGuestJits = 10;
+static constexpr size_t kPrewarmNativeGuestJits = 4;
 static std::mutex pooledNativeGuestJitsMutex;
 static std::array<PooledNativeGuestJit, MaxNativeGuestProcessors>
     pooledNativeGuestJits = {};
@@ -368,7 +368,7 @@ static bool AllocatePooledNativeGuestJit(
     config.wall_clock_cntpct = true;
     config.check_halt_on_memory_access = true;
     config.define_unpredictable_behaviour = true;
-    config.code_cache_size = 4 * 1024 * 1024;
+    config.code_cache_size = 2 * 1024 * 1024;
 
     DynarmicCallbacks32SetPageTable(
         out.callbacks,
@@ -409,19 +409,19 @@ static bool AllocatePooledNativeGuestJit(
 static NativeGuestJit *CreateNativeGuestJit(
         const context32 &initial, size_t processorId) {
     if (processorId == 0 ||
-            processorId > kMaxPooledNativeGuestJits ||
             processorId >= MaxNativeGuestProcessors) {
         return nullptr;
     }
 
     PooledNativeGuestJit pooled = {};
+    bool reusedFromPool = false;
     {
         std::lock_guard<std::mutex> lock(
             pooledNativeGuestJitsMutex);
         if (!pooledNativeGuestJitsPrewarmed) {
             pooledNativeGuestJitsPrewarmed = true;
             for (size_t id = 1;
-                    id <= kMaxPooledNativeGuestJits &&
+                    id <= kPrewarmNativeGuestJits &&
                     id < MaxNativeGuestProcessors;
                     ++id) {
                 if (pooledNativeGuestJits[id].jit == nullptr) {
@@ -430,11 +430,15 @@ static NativeGuestJit *CreateNativeGuestJit(
                 }
             }
         }
-        pooled = pooledNativeGuestJits[processorId];
-        pooledNativeGuestJits[processorId] = {};
+        if (pooledNativeGuestJits[processorId].jit != nullptr) {
+            pooled = pooledNativeGuestJits[processorId];
+            pooledNativeGuestJits[processorId] = {};
+            reusedFromPool = true;
+        }
     }
 
-    if (pooled.jit == nullptr) {
+    if (pooled.jit == nullptr &&
+            !AllocatePooledNativeGuestJit(processorId, pooled)) {
         return nullptr;
     }
 
@@ -448,6 +452,9 @@ static NativeGuestJit *CreateNativeGuestJit(
         runtime->callbacks,
         sharedHandle.num_page_table_entries,
         sharedHandle.page_table);
+    if (reusedFromPool) {
+        runtime->jit->ClearCache();
+    }
     constexpr Dynarmic::HaltReason kAllHaltReasons =
         LC32HaltReasonSVC |
         LC32HaltReasonRetFromGuest |
@@ -510,7 +517,6 @@ void DestroyNativeGuestJit(
     bool recycled = false;
     if (!shuttingDown &&
             runtime->processorId > 0 &&
-            runtime->processorId <= kMaxPooledNativeGuestJits &&
             runtime->processorId < MaxNativeGuestProcessors &&
             runtime->jit != nullptr) {
         std::lock_guard<std::mutex> poolLock(
