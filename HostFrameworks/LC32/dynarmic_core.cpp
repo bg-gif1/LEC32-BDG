@@ -111,6 +111,8 @@ bool Dynarmic_nativeInitialize() {
         config.always_little_endian = false;
         config.wall_clock_cntpct = true;
         config.check_halt_on_memory_access = true;
+        config.code_cache_size = 16 * 1024 * 1024;
+
         //    config.page_table_pointer_mask_bits = DYN_PAGE_BITS;
 
         //    config.unsafe_optimizations = true;
