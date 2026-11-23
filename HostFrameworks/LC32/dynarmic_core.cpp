@@ -112,6 +112,8 @@ bool Dynarmic_nativeInitialize() {
         config.wall_clock_cntpct = true;
         config.check_halt_on_memory_access = true;
         config.code_cache_size = 32 * 1024 * 1024;
+        config.optimizations &=
+            ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
         
         //    config.page_table_pointer_mask_bits = DYN_PAGE_BITS;
 
@@ -151,6 +153,9 @@ bool Dynarmic_nativeInitialize() {
             threadHandle.cpsr);
         RegisterGuestVmEpochParticipant(
             &mainGuestVmParticipant);
+        if (NativeGuestThreadsEnabled()) {
+            PrewarmNativeGuestJitPool();
+        }
     }
     nativeLifecycleState =
         NativeLifecycleState::Running;
@@ -967,8 +972,11 @@ u32 Dynarmic_mmap(
     }
 #endif
     lock.unlock();
-    InvalidateAllGuestJits(
-        address, static_cast<size_t>(size));
+    if ((flags & MAP_FIXED) != 0 ||
+            (guestProtection & PROT_EXEC) != 0) {
+        InvalidateAllGuestJits(
+            address, static_cast<size_t>(size));
+    }
     return address;
 }
 

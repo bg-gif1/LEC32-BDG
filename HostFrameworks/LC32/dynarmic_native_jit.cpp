@@ -6,11 +6,6 @@ void InvalidateAllGuestJits(
     if (size == 0) {
         return;
     }
-    if (threadHandle.jit != nullptr) {
-        threadHandle.jit->InvalidateCacheRange(
-            address, size);
-        return;
-    }
     Dynarmic::A32::Jit *mainJit =
         sharedHandle.cb != nullptr
         ? DynarmicCallbacks32Jit(sharedHandle.cb)
@@ -18,6 +13,20 @@ void InvalidateAllGuestJits(
     if (mainJit != nullptr) {
         mainJit->InvalidateCacheRange(
             address, size);
+    } else if (threadHandle.jit != nullptr) {
+        threadHandle.jit->InvalidateCacheRange(
+            address, size);
+    }
+
+    std::lock_guard<std::mutex> lock(
+        nativeGuestJitMutex);
+    for (NativeGuestJit *runtime : nativeGuestJits) {
+        if (runtime != nullptr &&
+                runtime->jit != nullptr &&
+                runtime->jit != mainJit) {
+            runtime->jit->InvalidateCacheRange(
+                address, size);
+        }
     }
 }
 
@@ -351,7 +360,7 @@ struct PooledNativeGuestJit {
     DynarmicCpsr *cpsr = nullptr;
 };
 
-static constexpr size_t kMaxPooledNativeGuestJits = 6;
+static constexpr size_t kMaxPooledNativeGuestJits = 8;
 static std::mutex pooledNativeGuestJitsMutex;
 static std::array<PooledNativeGuestJit, MaxNativeGuestProcessors>
     pooledNativeGuestJits = {};
@@ -378,6 +387,8 @@ static bool AllocatePooledNativeGuestJit(
     config.check_halt_on_memory_access = true;
     config.define_unpredictable_behaviour = true;
     config.code_cache_size = 8 * 1024 * 1024;
+    config.optimizations &=
+        ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
 
     DynarmicCallbacks32SetPageTable(
         out.callbacks,
@@ -415,6 +426,24 @@ static bool AllocatePooledNativeGuestJit(
     return true;
 }
 
+void PrewarmNativeGuestJitPool() {
+    std::lock_guard<std::mutex> lock(
+        pooledNativeGuestJitsMutex);
+    if (pooledNativeGuestJitsPrewarmed) {
+        return;
+    }
+    pooledNativeGuestJitsPrewarmed = true;
+    for (size_t id = 1;
+            id <= kMaxPooledNativeGuestJits &&
+            id < MaxNativeGuestProcessors;
+            ++id) {
+        if (pooledNativeGuestJits[id].jit == nullptr) {
+            (void)AllocatePooledNativeGuestJit(
+                id, pooledNativeGuestJits[id]);
+        }
+    }
+}
+
 static NativeGuestJit *CreateNativeGuestJit(
         const context32 &initial, size_t processorId) {
     if (processorId == 0 ||
@@ -423,22 +452,11 @@ static NativeGuestJit *CreateNativeGuestJit(
         return nullptr;
     }
 
+    PrewarmNativeGuestJitPool();
     PooledNativeGuestJit pooled = {};
     {
         std::lock_guard<std::mutex> lock(
             pooledNativeGuestJitsMutex);
-        if (!pooledNativeGuestJitsPrewarmed) {
-            pooledNativeGuestJitsPrewarmed = true;
-            for (size_t id = 1;
-                    id <= kMaxPooledNativeGuestJits &&
-                    id < MaxNativeGuestProcessors;
-                    ++id) {
-                if (pooledNativeGuestJits[id].jit == nullptr) {
-                    (void)AllocatePooledNativeGuestJit(
-                        id, pooledNativeGuestJits[id]);
-                }
-            }
-        }
         pooled = pooledNativeGuestJits[processorId];
         pooledNativeGuestJits[processorId] = {};
     }
@@ -457,7 +475,6 @@ static NativeGuestJit *CreateNativeGuestJit(
         runtime->callbacks,
         sharedHandle.num_page_table_entries,
         sharedHandle.page_table);
-    runtime->jit->ClearCache();
     constexpr Dynarmic::HaltReason kAllHaltReasons =
         LC32HaltReasonSVC |
         LC32HaltReasonRetFromGuest |
@@ -469,8 +486,10 @@ static NativeGuestJit *CreateNativeGuestJit(
         LC32HaltReasonThreadState |
         Dynarmic::HaltReason::Step |
         Dynarmic::HaltReason::CacheInvalidation;
+    runtime->jit->Reset();
     runtime->jit->ClearHalt(
         kAllHaltReasons | ~kAllHaltReasons);
+    runtime->jit->ClearCache();
     runtime->jit->Regs() = initial.regs;
     runtime->jit->ExtRegs() = initial.extRegs;
     runtime->jit->SetCpsr(initial.cpsr);
@@ -766,10 +785,6 @@ static void *RunNativeGuestThread(void *opaque) {
                     std::memory_order_acquire) &&
                 !guestProcessExitRequested.load(
                     std::memory_order_acquire)) {
-            runtime->workqueueHostBlocked.store(
-                false, std::memory_order_release);
-            runtime->workqueueCompensationPending.store(
-                false, std::memory_order_release);
             /* The registry no longer counts this worker. Fill the newly
              * available bounded slot before publishing runtime->exited; a
              * pump must never reap and pthread_join its own host thread. */
@@ -900,6 +915,7 @@ bool StartNativeGuestWorkqueueWorker(
             }
         }
         for (size_t candidate = 1;
+                candidate <= kMaxPooledNativeGuestJits &&
                 candidate < MaxNativeGuestProcessors;
                 ++candidate) {
             const uint64_t bit = uint64_t{1} << candidate;
@@ -1047,7 +1063,6 @@ bool StartNativeGuestWorkqueueWorker(
     runtime->debuggerId = debuggerId;
     runtime->workqueue = true;
     runtime->workqueueEventManager = job.hasDelivery && job.delivery.eventManager;
-    runtime->workqueuePriority = priority;
 
     GuestThreadContext thread = {};
     thread.debuggerId = debuggerId;
@@ -1211,6 +1226,7 @@ u32 GuestBsdthreadCreate(
             guestNextDebuggerThreadId++;
         if (NativeGuestThreadsEnabled()) {
             for (size_t candidate = 1;
+                    candidate <= kMaxPooledNativeGuestJits &&
                     candidate < MaxNativeGuestProcessors;
                     ++candidate) {
                 const uint64_t bit =
@@ -1698,15 +1714,8 @@ void NativeGuestWorkqueueHostBlockEnter() {
     if (nativeGuestWorkqueueHostBlockDepth++ != 0) {
         return;
     }
-    nativeGuestRuntime->workqueueHostBlocked.store(
-        true, std::memory_order_release);
-    nativeGuestRuntime->workqueueCompensationPending.store(
-        true, std::memory_order_release);
-    /*
-     * XNU compensates for a constrained workqueue thread which blocks in the
-     * kernel.  Without that compensation a single requested root worker can
-     * sleep in libnotify while unrelated dispatch work remains queued.
-     */
+    /* A blocking workqueue worker may leave already-requested or ready kevent
+     * work waiting for another bounded worker slot. */
     (void)PumpGuestWorkqueue();
 }
 
@@ -1715,12 +1724,7 @@ void NativeGuestWorkqueueHostBlockExit() {
             nativeGuestWorkqueueHostBlockDepth == 0) {
         return;
     }
-    if (--nativeGuestWorkqueueHostBlockDepth == 0) {
-        nativeGuestRuntime->workqueueCompensationPending.store(
-            false, std::memory_order_release);
-        nativeGuestRuntime->workqueueHostBlocked.store(
-            false, std::memory_order_release);
-    }
+    --nativeGuestWorkqueueHostBlockDepth;
 }
 
 bool GuestWorkqueueActiveForCurrentThread() {
