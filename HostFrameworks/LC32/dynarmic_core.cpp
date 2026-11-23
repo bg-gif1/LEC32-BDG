@@ -3,6 +3,85 @@
 #include "guest_dispatch.h"
 #include "guest_timers.h"
 
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
+#include <TargetConditionals.h>
+
+extern "C" std::uint32_t dyld_get_active_platform(void);
+
+__attribute__((noinline, optnone, naked))
+static void JIT26Detach(void) {
+    asm("mov x0, #0 \n"
+        "mov x1, #0 \n"
+        "mov x16, #0 \n"
+        "brk #0xf00d \n"
+        "ret");
+}
+
+static bool IsHostProcessTracedByDebugger() {
+    constexpr int kProcessFlagTraced = 0x00000800;
+    struct kinfo_proc hostProcess = {};
+    size_t hostLength = sizeof(hostProcess);
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    if (sysctl(mib, 4, &hostProcess, &hostLength, nullptr, 0) != 0 ||
+            hostLength == 0) {
+        return false;
+    }
+    return (hostProcess.kp_proc.p_flag & kProcessFlagTraced) != 0;
+}
+
+static bool HostDeviceHasTXM() {
+    io_registry_entry_t memory_map =
+        IORegistryEntryFromPath(0, "IODeviceTree:/chosen/memory-map");
+    if (memory_map == IO_OBJECT_NULL) {
+        return false;
+    }
+    CFArrayRef keys = (CFArrayRef)IORegistryEntryCreateCFProperty(
+        memory_map, CFSTR(kIORegistryEntryPropertyKeysKey), 0, 0);
+    IOObjectRelease(memory_map);
+    if (!keys) {
+        return false;
+    }
+    CFRange range = CFRangeMake(0, CFArrayGetCount(keys));
+    const bool hasTXM =
+        CFArrayContainsValue(keys, range, CFSTR("SPTM")) &&
+        CFArrayContainsValue(keys, range, CFSTR("TXM"));
+    CFRelease(keys);
+    return hasTXM;
+}
+
+static void DetachExternalJitDebuggerIfNeeded() {
+    static bool detached = false;
+    if (detached) {
+        return;
+    }
+    if (dyld_get_active_platform() != PLATFORM_IOS) {
+        return;
+    }
+    if (::access("/usr/lib/systemhook.dylib", F_OK) == 0) {
+        return;
+    }
+    bool runningOnIOS26OrLater = false;
+    if (__builtin_available(iOS 19.0, *)) {
+        runningOnIOS26OrLater = true;
+    }
+    if (!runningOnIOS26OrLater || !HostDeviceHasTXM()) {
+        return;
+    }
+    const char *const dualMapping = std::getenv("DYNARMIC_DUAL_MAPPED");
+    if (dualMapping != nullptr &&
+            (dualMapping[0] == '\0' || std::strcmp(dualMapping, "0") == 0)) {
+        return;
+    }
+    if (!IsHostProcessTracedByDebugger()) {
+        return;
+    }
+    detached = true;
+    JIT26Detach();
+}
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -156,6 +235,9 @@ bool Dynarmic_nativeInitialize() {
         if (NativeGuestThreadsEnabled()) {
             PrewarmNativeGuestJitPool();
         }
+#if defined(__APPLE__)
+        DetachExternalJitDebuggerIfNeeded();
+#endif
     }
     nativeLifecycleState =
         NativeLifecycleState::Running;

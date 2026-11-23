@@ -6,6 +6,11 @@ void InvalidateAllGuestJits(
     if (size == 0) {
         return;
     }
+    if (threadHandle.jit != nullptr) {
+        threadHandle.jit->InvalidateCacheRange(
+            address, size);
+        return;
+    }
     Dynarmic::A32::Jit *mainJit =
         sharedHandle.cb != nullptr
         ? DynarmicCallbacks32Jit(sharedHandle.cb)
@@ -13,20 +18,6 @@ void InvalidateAllGuestJits(
     if (mainJit != nullptr) {
         mainJit->InvalidateCacheRange(
             address, size);
-    } else if (threadHandle.jit != nullptr) {
-        threadHandle.jit->InvalidateCacheRange(
-            address, size);
-    }
-
-    std::lock_guard<std::mutex> lock(
-        nativeGuestJitMutex);
-    for (NativeGuestJit *runtime : nativeGuestJits) {
-        if (runtime != nullptr &&
-                runtime->jit != nullptr &&
-                runtime->jit != mainJit) {
-            runtime->jit->InvalidateCacheRange(
-                address, size);
-        }
     }
 }
 
