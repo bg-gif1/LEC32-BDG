@@ -5,10 +5,17 @@
 
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
-#include <IOKit/IOKitLib.h>
 #include <TargetConditionals.h>
 
-extern "C" std::uint32_t dyld_get_active_platform(void);
+extern "C" {
+std::uint32_t dyld_get_active_platform(void);
+mach_port_t IORegistryEntryFromPath(
+    mach_port_t mainPort, const char *path);
+CFTypeRef IORegistryEntryCreateCFProperty(
+    mach_port_t entry, CFStringRef key,
+    CFAllocatorRef allocator, uint32_t options);
+kern_return_t IOObjectRelease(mach_port_t object);
+}
 
 __attribute__((noinline, optnone, naked))
 static void JIT26Detach(void) {
@@ -32,18 +39,18 @@ static bool IsHostProcessTracedByDebugger() {
 }
 
 static bool HostDeviceHasTXM() {
-    io_registry_entry_t memory_map =
+    const mach_port_t memory_map =
         IORegistryEntryFromPath(0, "IODeviceTree:/chosen/memory-map");
-    if (memory_map == IO_OBJECT_NULL) {
+    if (memory_map == MACH_PORT_NULL) {
         return false;
     }
     CFArrayRef keys = (CFArrayRef)IORegistryEntryCreateCFProperty(
-        memory_map, CFSTR(kIORegistryEntryPropertyKeysKey), 0, 0);
+        memory_map, CFSTR("IORegistryEntryPropertyKeys"), nullptr, 0);
     IOObjectRelease(memory_map);
     if (!keys) {
         return false;
     }
-    CFRange range = CFRangeMake(0, CFArrayGetCount(keys));
+    const CFRange range = CFRangeMake(0, CFArrayGetCount(keys));
     const bool hasTXM =
         CFArrayContainsValue(keys, range, CFSTR("SPTM")) &&
         CFArrayContainsValue(keys, range, CFSTR("TXM"));
