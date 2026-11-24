@@ -342,7 +342,7 @@ struct PooledNativeGuestJit {
     DynarmicCpsr *cpsr = nullptr;
 };
 
-static constexpr size_t kMaxPooledNativeGuestJits = 6;
+static constexpr size_t kMaxPooledNativeGuestJits = 16;
 static std::mutex pooledNativeGuestJitsMutex;
 static std::array<PooledNativeGuestJit, MaxNativeGuestProcessors>
     pooledNativeGuestJits = {};
@@ -761,15 +761,11 @@ static void *RunNativeGuestThread(void *opaque) {
          * deferred-release queue instead.
         */
         threadHandle = {};
-        if (runtime->workqueue &&
-                !nativeShutdownRequested.load(
-                    std::memory_order_acquire) &&
-                !guestProcessExitRequested.load(
-                    std::memory_order_acquire)) {
-            /* The registry no longer counts this worker. Fill the newly
-             * available bounded slot before publishing runtime->exited; a
-             * pump must never reap and pthread_join its own host thread. */
-            (void)PumpGuestWorkqueue();
+        if (runtime->workqueue) {
+            runtime->workqueueHostBlocked.store(
+                false, std::memory_order_release);
+            runtime->workqueueCompensationPending.store(
+                false, std::memory_order_release);
         }
     }
 
@@ -834,7 +830,14 @@ static void *RunNativeGuestThread(void *opaque) {
             runtime->joinSemaphore = MACH_PORT_NULL;
             runtime->hostThreadCreated = false;
             DestroyNativeGuestJit(runtime);
+            lifecycleLock.unlock();
             signalJoinSemaphore(joinSemaphore, debuggerId);
+            if (!nativeShutdownRequested.load(
+                    std::memory_order_acquire) &&
+                    !guestProcessExitRequested.load(
+                        std::memory_order_acquire)) {
+                (void)PumpGuestWorkqueue();
+            }
             return nullptr;
         }
         fprintf(stderr,
@@ -1044,6 +1047,7 @@ bool StartNativeGuestWorkqueueWorker(
     runtime->debuggerId = debuggerId;
     runtime->workqueue = true;
     runtime->workqueueEventManager = job.hasDelivery && job.delivery.eventManager;
+    runtime->workqueuePriority = priority;
 
     GuestThreadContext thread = {};
     thread.debuggerId = debuggerId;
@@ -1200,35 +1204,61 @@ u32 GuestBsdthreadCreate(
 
     GuestThreadContext thread = {};
     size_t processorId = 0;
+    if (NativeGuestThreadsEnabled()) {
+        for (unsigned attempt = 0; attempt < 50; ++attempt) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(
+                    guestThreadMutex);
+                for (size_t candidate = 1;
+                        candidate <= kMaxPooledNativeGuestJits &&
+                        candidate < MaxNativeGuestProcessors;
+                        ++candidate) {
+                    const uint64_t bit =
+                        uint64_t{1} << candidate;
+                    if ((guestProcessorIdsInUse & bit) == 0) {
+                        guestProcessorIdsInUse |= bit;
+                        processorId = candidate;
+                        break;
+                    }
+                }
+            }
+            if (processorId != 0 ||
+                    NativeThreadStatePauseRequestedForCurrent()) {
+                break;
+            }
+            nativeCreateLock.unlock();
+            usleep(1000);
+            nativeCreateLock.lock();
+            if (nativeLifecycleState !=
+                    NativeLifecycleState::Running ||
+                    nativeShutdownRequested.load(
+                        std::memory_order_acquire) ||
+                    guestProcessExitRequested.load(
+                        std::memory_order_acquire)) {
+                break;
+            }
+            ReapExitedNativeGuestJits();
+        }
+        if (processorId == 0) {
+            fprintf(stderr,
+                "LC32: GuestBsdthreadCreate exhausted all %zu "
+                "pooled native JIT slots (entry=0x%x)\n",
+                kMaxPooledNativeGuestJits, function);
+            (void)mach_port_destroy(
+                mach_task_self(), threadPort);
+            if (allocationAddress != 0) {
+                (void)Dynarmic_munmap(
+                    allocationAddress, allocationSize);
+            }
+            return return_with_carry_direct(
+                EAGAIN, true);
+        }
+    }
     {
         std::lock_guard<std::recursive_mutex> lock(
             guestThreadMutex);
         thread.debuggerId =
             guestNextDebuggerThreadId++;
-        if (NativeGuestThreadsEnabled()) {
-            for (size_t candidate = 1;
-                    candidate <= kMaxPooledNativeGuestJits &&
-                    candidate < MaxNativeGuestProcessors;
-                    ++candidate) {
-                const uint64_t bit =
-                    uint64_t{1} << candidate;
-                if ((guestProcessorIdsInUse & bit) == 0) {
-                    guestProcessorIdsInUse |= bit;
-                    processorId = candidate;
-                    break;
-                }
-            }
-            if (processorId == 0) {
-                (void)mach_port_destroy(
-                    mach_task_self(), threadPort);
-                if (allocationAddress != 0) {
-                    (void)Dynarmic_munmap(
-                        allocationAddress, allocationSize);
-                }
-                return return_with_carry_direct(
-                    EAGAIN, true);
-            }
-        }
     }
     thread.threadSelfId = AllocateGuestThreadSelfId();
     thread.pthreadAddress = pthreadAddress;
@@ -1695,8 +1725,15 @@ void NativeGuestWorkqueueHostBlockEnter() {
     if (nativeGuestWorkqueueHostBlockDepth++ != 0) {
         return;
     }
-    /* A blocking workqueue worker may leave already-requested or ready kevent
-     * work waiting for another bounded worker slot. */
+    nativeGuestRuntime->workqueueHostBlocked.store(
+        true, std::memory_order_release);
+    nativeGuestRuntime->workqueueCompensationPending.store(
+        true, std::memory_order_release);
+    /*
+     * XNU compensates for a constrained workqueue thread which blocks in the
+     * kernel.  Without that compensation a single requested root worker can
+     * sleep in libnotify while unrelated dispatch work remains queued.
+     */
     (void)PumpGuestWorkqueue();
 }
 
@@ -1705,7 +1742,12 @@ void NativeGuestWorkqueueHostBlockExit() {
             nativeGuestWorkqueueHostBlockDepth == 0) {
         return;
     }
-    --nativeGuestWorkqueueHostBlockDepth;
+    if (--nativeGuestWorkqueueHostBlockDepth == 0) {
+        nativeGuestRuntime->workqueueCompensationPending.store(
+            false, std::memory_order_release);
+        nativeGuestRuntime->workqueueHostBlocked.store(
+            false, std::memory_order_release);
+    }
 }
 
 bool GuestWorkqueueActiveForCurrentThread() {

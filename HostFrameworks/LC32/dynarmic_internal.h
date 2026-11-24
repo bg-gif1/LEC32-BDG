@@ -770,6 +770,9 @@ struct NativeGuestJit {
     bool exited = false;
     bool workqueue = false;
     bool workqueueEventManager = false;
+    std::atomic<bool> workqueueHostBlocked{false};
+    std::atomic<bool> workqueueCompensationPending{false};
+    u32 workqueuePriority = 0;
     size_t threadStateUsers = 0;
     NativeThreadStateSlot threadState;
     mach_port_t joinSemaphore = MACH_PORT_NULL;
