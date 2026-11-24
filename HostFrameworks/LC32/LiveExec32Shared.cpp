@@ -958,6 +958,7 @@ int LC32RunGuest(int argc, char* argv[], char* envp[]) {
                 argv[0] : "LiveExec32");
         return 1;
     }
+    signal(SIGPIPE, SIG_IGN);
 
     const std::string configuredGuestHome =
         LC32GuestBootstrap::SelectConfiguredHomeDirectory(

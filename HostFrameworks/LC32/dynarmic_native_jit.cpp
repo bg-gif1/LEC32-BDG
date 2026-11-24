@@ -9,15 +9,6 @@ void InvalidateAllGuestJits(
     if (threadHandle.jit != nullptr) {
         threadHandle.jit->InvalidateCacheRange(
             address, size);
-        return;
-    }
-    Dynarmic::A32::Jit *mainJit =
-        sharedHandle.cb != nullptr
-        ? DynarmicCallbacks32Jit(sharedHandle.cb)
-        : nullptr;
-    if (mainJit != nullptr) {
-        mainJit->InvalidateCacheRange(
-            address, size);
     }
 }
 
@@ -351,7 +342,7 @@ struct PooledNativeGuestJit {
     DynarmicCpsr *cpsr = nullptr;
 };
 
-static constexpr size_t kMaxPooledNativeGuestJits = 8;
+static constexpr size_t kMaxPooledNativeGuestJits = 6;
 static std::mutex pooledNativeGuestJitsMutex;
 static std::array<PooledNativeGuestJit, MaxNativeGuestProcessors>
     pooledNativeGuestJits = {};
@@ -377,7 +368,7 @@ static bool AllocatePooledNativeGuestJit(
     config.wall_clock_cntpct = true;
     config.check_halt_on_memory_access = true;
     config.define_unpredictable_behaviour = true;
-    config.code_cache_size = 8 * 1024 * 1024;
+    config.code_cache_size = 16 * 1024 * 1024;
     config.optimizations &=
         ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
 
@@ -480,7 +471,6 @@ static NativeGuestJit *CreateNativeGuestJit(
     runtime->jit->Reset();
     runtime->jit->ClearHalt(
         kAllHaltReasons | ~kAllHaltReasons);
-    runtime->jit->ClearCache();
     runtime->jit->Regs() = initial.regs;
     runtime->jit->ExtRegs() = initial.extRegs;
     runtime->jit->SetCpsr(initial.cpsr);

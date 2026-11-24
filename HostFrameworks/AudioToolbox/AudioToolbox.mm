@@ -2,6 +2,7 @@
 @import Foundation;
 
 #include "bridge.h"
+#include "../LC32/crash_exception.h"
 #include "../../GuestFrameworks/AudioToolbox/LC32AudioToolboxBridge.h"
 
 #include <objc/message.h>
@@ -67,6 +68,7 @@ struct AudioFileEntry {
 struct AudioConverterEntry {
     AudioConverterRef converter = nullptr;
     u32 token = 0;
+    u32 guestCallbackStorage = 0;
     /* AudioConverter may retain input supplied by its callback until it asks
      * for input again. Keep the copied guest storage alive across Fill calls,
      * rather than tying it to one AudioConverterFillComplexBuffer frame. */
@@ -392,8 +394,7 @@ public:
     static constexpr u32 kTotalBytes =
         kAudioBufferListOffset + kAudioBufferListBytes;
 
-    GuestAudioConverterCallbackStorage() {
-        static thread_local u32 cachedAllocation = 0;
+    explicit GuestAudioConverterCallbackStorage(u32 &cachedAllocation) {
         if(!cachedAllocation) {
             cachedAllocation = AllocateGuestCallbackBytes(kTotalBytes);
             if(cachedAllocation &&
@@ -465,7 +466,7 @@ OSStatus AudioConverterInputCallbackBridge(
         AudioConverterRef, UInt32 *ioNumberDataPackets,
         AudioBufferList *ioData,
         AudioStreamPacketDescription **outDataPacketDescription,
-        void *rawContext) noexcept {
+        void *rawContext) {
     if(outDataPacketDescription) *outDataPacketDescription = nullptr;
     AudioConverterInputContext *context =
         static_cast<AudioConverterInputContext *>(rawContext);
@@ -576,6 +577,9 @@ OSStatus AudioConverterInputCallbackBridge(
         }
         *ioNumberDataPackets = returnedPackets;
         return noErr;
+    } catch(NSException *exception) {
+        if(LC32IsGuestCrashException(exception)) @throw;
+        return kAudio_ParamError;
     } catch(const std::bad_alloc &) {
         return kAudio_MemFullError;
     } catch(...) {
@@ -2012,6 +2016,11 @@ OSStatus DispatchAudioConverterDispose(
 
     std::lock_guard<std::recursive_mutex> lock(entry->mutex);
     if(!entry->converter) return kAudio_ParamError;
+    if(entry->guestCallbackStorage &&
+       Dynarmic_guest_thread_is_registered()) {
+        guest_free(entry->guestCallbackStorage);
+        entry->guestCallbackStorage = 0;
+    }
     OSStatus status;
     {
         AudioToolboxGuestHostCallQuiescence quiescence;
@@ -2182,23 +2191,24 @@ OSStatus DispatchAudioConverterFillComplexBuffer(
         std::vector<AudioStreamPacketDescription> packetDescriptions;
         if(SlotU32(call, 5)) packetDescriptions.resize(requestedPackets);
 
-        GuestAudioConverterCallbackStorage callbackStorage;
-        if(!callbackStorage) return kAudio_MemFullError;
-        AudioConverterInputContext inputContext = {
-            .guestConverter = SlotU32(call, 0),
-            .guestCallback = SlotU32(call, 1),
-            .guestUserData = SlotU32(call, 2),
-            .storage = &callbackStorage,
-            .audioStorage = &entry->callbackAudioStorage,
-            .packetDescriptions =
-                &entry->callbackPacketDescriptions,
-        };
-
         UInt32 returnedPackets = requestedPackets;
         OSStatus status;
         {
             std::lock_guard<std::recursive_mutex> lock(entry->mutex);
             if(!entry->converter) return kAudio_ParamError;
+            GuestAudioConverterCallbackStorage callbackStorage(
+                entry->guestCallbackStorage);
+            if(!callbackStorage) return kAudio_MemFullError;
+            AudioConverterInputContext inputContext = {
+                .guestConverter = SlotU32(call, 0),
+                .guestCallback = SlotU32(call, 1),
+                .guestUserData = SlotU32(call, 2),
+                .storage = &callbackStorage,
+                .audioStorage = &entry->callbackAudioStorage,
+                .packetDescriptions =
+                    &entry->callbackPacketDescriptions,
+            };
+            AudioToolboxGuestHostCallQuiescence quiescence;
             status = AudioConverterFillComplexBuffer(
                 entry->converter, AudioConverterInputCallbackBridge,
                 &inputContext, &returnedPackets, hostList,
@@ -2243,6 +2253,9 @@ OSStatus DispatchAudioConverterFillComplexBuffer(
             return kAudio_ParamError;
         }
         return status;
+    } catch(NSException *exception) {
+        if(LC32IsGuestCrashException(exception)) @throw;
+        return kAudio_ParamError;
     } catch(const std::bad_alloc &) {
         return kAudio_MemFullError;
     } catch(...) {

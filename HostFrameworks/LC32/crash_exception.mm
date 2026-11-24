@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <objc/message.h>
 
 #include "crash_exception.h"
 
@@ -58,6 +59,21 @@ void LC32ThrowGuestCrashException(
                 exceptionWithName:LC32GuestCrashExceptionName
                              reason:reason
                            userInfo:nil];
+            NSUncaughtExceptionHandler *handler =
+                NSGetUncaughtExceptionHandler();
+            if (handler != nullptr) {
+                handler(exception);
+            }
+            SEL lcDefaultsSelector =
+                NSSelectorFromString(@"lcUserDefaults");
+            if ([NSUserDefaults respondsToSelector:lcDefaultsSelector]) {
+                NSUserDefaults *lcDefaults =
+                    reinterpret_cast<NSUserDefaults *(*)(id, SEL)>(
+                        objc_msgSend)(
+                            [NSUserDefaults class],
+                            lcDefaultsSelector);
+                [lcDefaults synchronize];
+            }
         } @catch (__unused NSException *constructionException) {
             exception = nil;
         }

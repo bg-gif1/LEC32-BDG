@@ -197,7 +197,7 @@ bool Dynarmic_nativeInitialize() {
         config.always_little_endian = false;
         config.wall_clock_cntpct = true;
         config.check_halt_on_memory_access = true;
-        config.code_cache_size = 32 * 1024 * 1024;
+        config.code_cache_size = 128 * 1024 * 1024;
         config.optimizations &=
             ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
         
@@ -592,6 +592,7 @@ int Dynarmic_munmap(u64 address, u64 size) {
     }
 #endif
 
+    bool hadExecutablePage = false;
     InvalidateGuestMemoryLookupCaches();
     for(u64 vaddr = address; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
@@ -603,6 +604,10 @@ int Dynarmic_munmap(u64 address, u64 size) {
                 __ATOMIC_RELEASE);
         }
         t_memory_page page = kh_value(memory, k);
+        if (page != nullptr &&
+                (page->perms & PROT_EXEC) != 0) {
+            hadExecutablePage = true;
+        }
         /*
          * Guest pages are 4 KiB while Apple Silicon host VM pages are
          * 16 KiB. Anonymous guest mappings therefore share one host mmap
@@ -615,9 +620,11 @@ int Dynarmic_munmap(u64 address, u64 size) {
         kh_del(memory, memory, k);
     }
     lock.unlock();
-    InvalidateAllGuestJits(
-        static_cast<u32>(address),
-        static_cast<size_t>(size));
+    if (hadExecutablePage) {
+        InvalidateAllGuestJits(
+            static_cast<u32>(address),
+            static_cast<size_t>(size));
+    }
     return 0;
 }
 
@@ -852,6 +859,8 @@ u32 Dynarmic_direct_mmap(
     address = static_cast<u32>(reservedAddress);
     InvalidateGuestMemoryLookupCaches();
 
+    bool hadOrHasExecutablePage =
+        (protection & PROT_EXEC) != 0;
     const u64 end = reservedAddress + size;
     for(u64 vaddr = reservedAddress; vaddr < end;
             vaddr += DYN_PAGE_SIZE) {
@@ -861,6 +870,9 @@ u32 Dynarmic_direct_mmap(
             reinterpret_cast<u64>(src) + off +
                 vaddr - reservedAddress);
         t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
+        if ((page->perms & PROT_EXEC) != 0) {
+            hadOrHasExecutablePage = true;
+        }
         t_memory_backing oldBacking =
             page->backing;
         page->addr = addr;
@@ -881,8 +893,10 @@ u32 Dynarmic_direct_mmap(
     }
     reservations.clear();
     lock.unlock();
-    InvalidateAllGuestJits(
-        address, static_cast<size_t>(size));
+    if (hadOrHasExecutablePage) {
+        InvalidateAllGuestJits(
+            address, static_cast<size_t>(size));
+    }
     return address;
 }
 
@@ -1020,6 +1034,8 @@ u32 Dynarmic_mmap(
     }
 #endif
 
+    bool hadOrHasExecutablePage =
+        (guestProtection & PROT_EXEC) != 0;
     const u64 end = reservedAddress + size;
     InvalidateGuestMemoryLookupCaches();
     for(u64 vaddr = reservedAddress; vaddr < end;
@@ -1027,6 +1043,9 @@ u32 Dynarmic_mmap(
         u64 idx = vaddr >> DYN_PAGE_BITS;
 
         t_memory_page page = kh_value(memory, kh_get(memory, memory, vaddr));
+        if ((page->perms & PROT_EXEC) != 0) {
+            hadOrHasExecutablePage = true;
+        }
         t_memory_backing oldBacking =
             page->backing;
         page->addr = (void *)addr;
@@ -1061,8 +1080,7 @@ u32 Dynarmic_mmap(
     }
 #endif
     lock.unlock();
-    if ((flags & MAP_FIXED) != 0 ||
-            (guestProtection & PROT_EXEC) != 0) {
+    if (hadOrHasExecutablePage) {
         InvalidateAllGuestJits(
             address, static_cast<size_t>(size));
     }
@@ -1116,10 +1134,14 @@ kern_return_t Dynarmic_vm_remap(u32 *address, u32 size, u32 mask,
     // Retain every source first: an overlapping overwrite may release the
     // original mappings while later pages still refer to those same backings.
     for(const auto &page : pages) ++page.backing->references;
+    bool hadExecutablePage = false;
     InvalidateGuestMemoryLookupCaches();
     for(size_t index = 0; index < pages.size(); ++index) {
         const u64 guestAddress = mapped + index * DYN_PAGE_SIZE;
         t_memory_page page = kh_value(memory, kh_get(memory, memory, guestAddress));
+        if ((page->perms & PROT_EXEC) != 0) {
+            hadExecutablePage = true;
+        }
         t_memory_backing previous = page->backing;
         *page = pages[index];
         page->enforceDataPermissions = true;
@@ -1133,7 +1155,9 @@ kern_return_t Dynarmic_vm_remap(u32 *address, u32 size, u32 mask,
     *address = static_cast<u32>(mapped);
     *protection = commonProtection;
     lock.unlock();
-    InvalidateAllGuestJits(*address, static_cast<size_t>(length));
+    if (hadExecutablePage) {
+        InvalidateAllGuestJits(*address, static_cast<size_t>(length));
+    }
     return KERN_SUCCESS;
 }
 
@@ -1283,8 +1307,13 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
             update.requiredHostProtection;
     }
 
+    bool hadOrHasExecutablePage =
+        (perms & PROT_EXEC) != 0;
     for (const ProtectedPage &protectedPage :
             pages) {
+        if ((protectedPage.page->perms & PROT_EXEC) != 0) {
+            hadOrHasExecutablePage = true;
+        }
         protectedPage.page->perms = perms;
         protectedPage.page->enforceDataPermissions =
             true;
@@ -1302,9 +1331,11 @@ int Dynarmic_mprotect(u64 address, u64 size, int perms) {
         }
     }
     lock.unlock();
-    InvalidateAllGuestJits(
-        static_cast<u32>(address),
-        static_cast<size_t>(size));
+    if (hadOrHasExecutablePage) {
+        InvalidateAllGuestJits(
+            static_cast<u32>(address),
+            static_cast<size_t>(size));
+    }
     return 0;
 }
 
@@ -2569,13 +2600,14 @@ Dynarmic::HaltReason Dynarmic_emu_1start(u32 pc) {
            * Workqueue bit behind. It is only an error when a transition is
            * still pending but cannot be applied.
            */
-          const Dynarmic::HaltReason remaining =
-              reason & ~LC32HaltReasonWorkqueue;
-          if (!!remaining) {
-            reason = remaining;
+          reason = reason & ~LC32HaltReasonWorkqueue;
+          if (!reason) {
+            continue;
+          }
+          if (transitionPending ||
+                  !Dynarmic::Has(reason, LC32HaltReasonSVC)) {
             break;
           }
-          continue;
         }
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
           break;
@@ -2642,17 +2674,18 @@ Dynarmic::HaltReason Dynarmic_emu_1resume() {
                 reason = LC32HaltReasonTrap;
                 break;
             }
-            const Dynarmic::HaltReason remaining =
-                reason & ~LC32HaltReasonWorkqueue;
-            if (!!remaining) {
-                reason = remaining;
+            reason = reason & ~LC32HaltReasonWorkqueue;
+            if (!reason) {
+                if (!NativeDebuggerMainContextMayRun()) {
+                    reason = Dynarmic::HaltReason::Step;
+                    break;
+                }
+                continue;
+            }
+            if (transitionPending ||
+                    !Dynarmic::Has(reason, LC32HaltReasonSVC)) {
                 break;
             }
-            if (!NativeDebuggerMainContextMayRun()) {
-                reason = Dynarmic::HaltReason::Step;
-                break;
-            }
-            continue;
         }
         if (!Dynarmic::Has(reason, LC32HaltReasonSVC)) {
             break;
