@@ -578,7 +578,7 @@ OSStatus AudioConverterInputCallbackBridge(
         *ioNumberDataPackets = returnedPackets;
         return noErr;
     } catch(NSException *exception) {
-        if(LC32IsGuestCrashException(exception)) @throw;
+        if(LC32IsGuestCrashException(exception)) @throw exception;
         return kAudio_ParamError;
     } catch(const std::bad_alloc &) {
         return kAudio_MemFullError;
@@ -2254,7 +2254,7 @@ OSStatus DispatchAudioConverterFillComplexBuffer(
         }
         return status;
     } catch(NSException *exception) {
-        if(LC32IsGuestCrashException(exception)) @throw;
+        if(LC32IsGuestCrashException(exception)) @throw exception;
         return kAudio_ParamError;
     } catch(const std::bad_alloc &) {
         return kAudio_MemFullError;
