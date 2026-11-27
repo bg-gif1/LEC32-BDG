@@ -67,6 +67,25 @@
 @end
 
 #if LC32_UIKIT_COMPATIBILITY
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+@interface UIApplication (LC32GuestLegacyIPadOrientation)
+- (UIInterfaceOrientation)lc32_guestStatusBarOrientation;
+@end
+
+@implementation UIApplication (LC32GuestLegacyIPadOrientation)
+- (UIInterfaceOrientation)lc32_guestStatusBarOrientation {
+    if(LC32UIKitLegacyIPadCanvasEnabled()) {
+        const UIInterfaceOrientation orientation =
+            (UIInterfaceOrientation)LC32UIKitGetLegacyStatusBarOrientation();
+        if(orientation != UIInterfaceOrientationUnknown) return orientation;
+    }
+    const SEL original = @selector(statusBarOrientation);
+    using Getter = UIInterfaceOrientation (*)(id, SEL);
+    return ((Getter)LC32NativeHostMethod(self, original))(self, original);
+}
+@end
+
 @interface LC32GuestViewMutationHooks : NSObject
 @end
 @implementation LC32GuestViewMutationHooks
@@ -88,6 +107,33 @@
         {nullptr, [](id view, const uint64_t *) {
             LC32UIKitDidSetGuestAutoresizingMask(view);
         }});
+
+    Class applicationClass = objc_getClass("UIApplication");
+    if(applicationClass) {
+        LC32RegisterHostSelectorHook(applicationClass,
+            @selector(statusBarOrientation),
+            {@selector(lc32_guestStatusBarOrientation), nullptr});
+        auto statusBarOrientationChanged = [](id, const uint64_t *args) {
+            if(!LC32UIKitLegacyCompatibilityEnabled() &&
+                    LC32UIKitLegacyIPadCanvasEnabled()) {
+                LC32UIKitHandleLegacyStatusBarOrientation(
+                    static_cast<u32>(args[0]), 0, 0);
+            }
+        };
+        const SEL orientationSetters[] = {
+            @selector(setStatusBarOrientation:),
+            @selector(setStatusBarOrientation:animated:),
+            sel_registerName("setStatusBarOrientation:animation:duration:"),
+            sel_registerName("setStatusBarOrientation:animationParameters:"),
+            sel_registerName("setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:"),
+            sel_registerName("setStatusBarOrientation:animationParameters:notifySpringBoardAndFence:updateBlock:"),
+        };
+        for(SEL selector : orientationSetters) {
+            LC32RegisterHostSelectorHook(applicationClass, selector,
+                {nullptr, statusBarOrientationChanged});
+        }
+    }
 }
 @end
+#pragma clang diagnostic pop
 #endif

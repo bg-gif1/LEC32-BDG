@@ -2,6 +2,7 @@
 #define LC32_LEGACY_CANVAS_H
 
 #import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 #include <stdint.h>
 
@@ -200,6 +201,45 @@ static inline BOOL LC32BundleNeedsLegacyIPadCanvas(
         NSBundle *bundle, uint32_t sdkVersion) {
     return LC32BundleLegacyIPadCanvasKind(bundle, sdkVersion) !=
         LC32LegacyIPadCanvasNone;
+}
+
+/* Pre-iOS-8 iPad and Universal applications without a launch storyboard were
+ * authored for the classic 768x1024 (4:3) iPad screen. Outside LiveContainer,
+ * iPadOS runs them in a 768x1024 Classic Mode canvas on modern non-4:3 iPads
+ * (such as 820x1180 or 834x1194). */
+static inline BOOL LC32BundleNeedsClassicIPadCanvasOnPad(
+        NSBundle *bundle, uint32_t sdkVersion) {
+    if(!bundle || sdkVersion >= 0x00080000) return NO;
+    NSDictionary *info = [bundle infoDictionary];
+    if([info objectForKey:@"UILaunchStoryboardName"] != nil ||
+            [info objectForKey:@"UILaunchStoryboardName~ipad"] != nil) {
+        return NO;
+    }
+    const LC32SupportedDeviceFamilies families =
+        LC32BundleSupportedDeviceFamilies(bundle);
+    return families.supportsPad ||
+        LC32BundleLegacyIPadCanvasKind(bundle, sdkVersion) !=
+            LC32LegacyIPadCanvasNone;
+}
+
+static inline BOOL LC32HostRectNeedsClassicIPadCanvas(
+        CGRect hostBounds, BOOL hostIsPad) {
+    const CGFloat width = hostBounds.size.width;
+    const CGFloat height = hostBounds.size.height;
+    const CGFloat shortEdge = width < height ? width : height;
+    const CGFloat longEdge = width > height ? width : height;
+    if(!(shortEdge > 0) || !(longEdge > 0)) return NO;
+    if(!hostIsPad) {
+        return shortEdge < 600;
+    }
+    /* Classic 4:3 iPads already expose 768x1024, and narrow Split View
+     * scenes have shortEdge < 700. Full-screen modern non-4:3 iPads need a
+     * coherent 768x1024 compatibility canvas. */
+    const CGFloat dShort =
+        shortEdge > 768 ? shortEdge - 768 : 768 - shortEdge;
+    const CGFloat dLong =
+        longEdge > 1024 ? longEdge - 1024 : 1024 - longEdge;
+    return shortEdge >= 700 && (dShort >= 0.5 || dLong >= 0.5);
 }
 
 static inline BOOL LC32BundleUsesLandscapeOnlyPolicy(

@@ -194,6 +194,17 @@ static void LC32ResolveLegacyUniqueIdentifierFallback(void) {
 }
 
 #if LC32_UIKIT_COMPATIBILITY
+static uint32_t LC32LegacyGuestSDKVersion;
+static BOOL LC32HostIsIPad;
+
+static UIUserInterfaceIdiom LC32HostDeviceIdiom(void) {
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, @selector(userInterfaceIdiom), NO);
+    return (UIUserInterfaceIdiom)LC32InvokeHostSelector(
+        UIDevice.currentDevice.host_self, selector, (uint64_t)0);
+}
+
 static void LC32ResolveLegacyCanvas(void) {
     const BOOL compatibility = LC32GuestUIKitLegacyCompatibilityEnabled();
     NSBundle *bundle = NSBundle.mainBundle;
@@ -202,13 +213,17 @@ static void LC32ResolveLegacyCanvas(void) {
         "LC32GetGuestExecutableSDKVersion", YES);
     const uint32_t sdkVersion = getter
         ? LC32InvokeHostCRet32(getter) : 0;
+    LC32LegacyGuestSDKVersion = sdkVersion;
+    LC32HostIsIPad = LC32HostDeviceIdiom() == UIUserInterfaceIdiomPad;
     const LC32LegacyIPadCanvasKind canvasKind =
         LC32BundleLegacyIPadCanvasKind(bundle, sdkVersion);
     const uint64_t canvasGetter = LC32Dlsym(
         "LC32UIKitLegacyIPadCanvasEnabled", YES);
     LC32LegacyIPadCanvasRequired = canvasGetter
         ? LC32InvokeHostCRet32(canvasGetter) != 0
-        : compatibility && canvasKind != LC32LegacyIPadCanvasNone;
+        : compatibility && (LC32HostIsIPad
+            ? LC32BundleNeedsClassicIPadCanvasOnPad(bundle, sdkVersion)
+            : canvasKind != LC32LegacyIPadCanvasNone);
     LC32LegacyPhoneCanvasRequired = compatibility && getter &&
         LC32BundleUsesFixedLandscapePhoneCanvas(bundle, sdkVersion);
     LC32LegacyIPadStatusBarHidden = [[info objectForKey:
@@ -222,12 +237,8 @@ static BOOL LC32RequiresLegacyIPadCanvas(void) {
 
 static BOOL LC32ScreenNeedsLegacyIPadCanvas(CGRect hostBounds) {
     if(!LC32RequiresLegacyIPadCanvas()) return NO;
-    const CGFloat shortEdge = MIN(hostBounds.size.width,
-                                  hostBounds.size.height);
-    /* A full-size iPad canvas has never had a short edge below 600 points.
-     * A smaller value means that an iPad-only guest is running inside a
-     * phone/classic host scene and needs a coherent virtual canvas. */
-    return shortEdge > 0 && shortEdge < 600;
+    return LC32HostRectNeedsClassicIPadCanvas(
+        hostBounds, LC32HostIsIPad);
 }
 
 static BOOL LC32RequiresFixedLandscapePhoneCanvas(void) {
@@ -763,11 +774,15 @@ compatibleWithTraitCollection:nil];
     if(LC32ScreenNeedsLegacyIPadCanvas(frame)) {
         /* iOS 3.x iPad applications laid out below a 20-point status bar.
          * Preserve it when visible; full-screen apps use -bounds instead. */
-        frame = LC32LegacyIPadStatusBarHidden
+        const BOOL hidden = LC32LegacyIPadStatusBarHidden ||
+            UIApplication.sharedApplication.statusBarHidden;
+        frame = hidden
             ? CGRectMake(0, 0, 768, 1024)
             : CGRectMake(0, 20, 768, 1004);
     } else if(LC32RequiresFixedLandscapePhoneCanvas()) {
-        frame = LC32LegacyIPadStatusBarHidden
+        const BOOL hidden = LC32LegacyIPadStatusBarHidden ||
+            UIApplication.sharedApplication.statusBarHidden;
+        frame = hidden
             ? CGRectMake(0, 0, 320, 480)
             : CGRectMake(0, 20, 320, 460);
     }
@@ -779,7 +794,20 @@ compatibleWithTraitCollection:nil];
 #if LC32_UIKIT_COMPATIBILITY
     const CGRect bounds = LC32HostScreenRect(self, @selector(bounds));
     if(LC32ScreenNeedsLegacyIPadCanvas(bounds)) {
-        return 1.0f;
+        /* iPad-on-phone canvases and pre-iOS-5.1 (pre-Retina-iPad) binaries
+         * expect a 1x 768x1024 backing surface. iOS 5.1+ Retina iPad binaries
+         * running on a modern iPad render at 2x (1536x2048). */
+        if(!LC32HostIsIPad || LC32LegacyGuestSDKVersion < 0x00050100) {
+            return 1.0f;
+        }
+        static uint64_t padHostSelector __attribute__((aligned(8)));
+        const uint64_t padSelector = LC32CachedHostSelector(
+            &padHostSelector, _cmd, NO);
+        CGFloat padScale = (CGFloat)LC32HostFloatingResult(
+            LC32InvokeHostSelector(self.host_self, padSelector, (uint64_t)0));
+        if(padScale > 2.0f) padScale = 2.0f;
+        if(!(padScale >= 1.0f)) padScale = 2.0f;
+        return padScale;
     }
 #endif
 
@@ -797,6 +825,30 @@ compatibleWithTraitCollection:nil];
 }
 
 @end
+
+#if LC32_UIKIT_COMPATIBILITY
+@implementation UIScreenMode (LC32LegacyCanvas)
+
+- (CGSize)size {
+    UIScreen *mainScreen = UIScreen.mainScreen;
+    const CGRect hostBounds = LC32HostScreenRect(
+        mainScreen, @selector(bounds));
+    if(LC32ScreenNeedsLegacyIPadCanvas(hostBounds) &&
+            self == mainScreen.currentMode) {
+        const CGFloat scale = mainScreen.scale;
+        return CGSizeMake(768.0f * scale, 1024.0f * scale);
+    }
+    static uint64_t hostSelector __attribute__((aligned(8)));
+    const uint64_t selector = LC32CachedHostSelector(
+        &hostSelector, _cmd, YES);
+    CGSize_64 hostResult;
+    LC32InvokeHostSelector(self.host_self, selector,
+                           &hostResult, sizeof(hostResult), (uint64_t)0);
+    return LC32GuestCGSize(hostResult);
+}
+
+@end
+#endif
 
 @implementation UIView (LC32LegacyAnimationContext)
 

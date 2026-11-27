@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "bridge.h"
+#include "LiveExec32Shared.h"
 #include "../../GuestFrameworks/OpenGLES/LC32OpenGLESBridge.h"
 
 #pragma clang diagnostic push
@@ -2319,6 +2320,18 @@ size_t VertexAttribElementCount(GLenum pname) {
     BOOL requestedRGB565 = NO;
     if([(id)drawable isKindOfClass:CAEAGLLayer.class]) {
         drawableLayer = (CAEAGLLayer *)(id)drawable;
+        const char *guestExec = getenv("LC32_GUEST_EXECUTABLE");
+        if(guestExec && guestExec[0] &&
+                drawableLayer.contentsScale > 1.0 &&
+                LC32GetGuestExecutableSDKVersion() < 0x00050100 &&
+                LC32UIKitLegacyIPadCanvasEnabled()) {
+            /* Pre-iOS-5.1 iPad applications predate the first Retina iPad
+             * (iPad 3) and commonly pass fixed 768x1024 point dimensions to
+             * glViewport without reading renderbuffer pixel dimensions. Keep
+             * their CAEAGLLayer backing at 1x even when modern host UIKit
+             * assigns the window screen's 2x scale. */
+            drawableLayer.contentsScale = 1.0;
+        }
         NSDictionary *properties = drawableLayer.drawableProperties;
         NSMutableDictionary *normalized =
             [NSMutableDictionary dictionaryWithCapacity:properties.count];

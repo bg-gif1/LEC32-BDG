@@ -213,6 +213,10 @@ NSArray *DeclaredOrientationNames() {
 UIInterfaceOrientationMask DeclaredOrientations() {
     UIInterfaceOrientationMask mask = 0;
     for(id name in DeclaredOrientationNames()) mask |= OrientationBit(OrientationNamed(name));
+    if(!mask) {
+        mask = OrientationBit(OrientationNamed(
+            NSBundle.mainBundle.infoDictionary[@"UIInterfaceOrientation"]));
+    }
     return mask ?: UIInterfaceOrientationMaskAllButUpsideDown;
 }
 

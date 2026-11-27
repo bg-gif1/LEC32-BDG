@@ -342,7 +342,7 @@ struct PooledNativeGuestJit {
     DynarmicCpsr *cpsr = nullptr;
 };
 
-static constexpr size_t kMaxPooledNativeGuestJits = 16;
+static constexpr size_t kMaxPooledNativeGuestJits = 10;
 static std::mutex pooledNativeGuestJitsMutex;
 static std::array<PooledNativeGuestJit, MaxNativeGuestProcessors>
     pooledNativeGuestJits = {};
@@ -368,7 +368,7 @@ static bool AllocatePooledNativeGuestJit(
     config.wall_clock_cntpct = true;
     config.check_halt_on_memory_access = true;
     config.define_unpredictable_behaviour = true;
-    config.code_cache_size = 16 * 1024 * 1024;
+    config.code_cache_size = 8 * 1024 * 1024;
     config.optimizations &=
         ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
 
@@ -1727,13 +1727,6 @@ void NativeGuestWorkqueueHostBlockEnter() {
     }
     nativeGuestRuntime->workqueueHostBlocked.store(
         true, std::memory_order_release);
-    nativeGuestRuntime->workqueueCompensationPending.store(
-        true, std::memory_order_release);
-    /*
-     * XNU compensates for a constrained workqueue thread which blocks in the
-     * kernel.  Without that compensation a single requested root worker can
-     * sleep in libnotify while unrelated dispatch work remains queued.
-     */
     (void)PumpGuestWorkqueue();
 }
 
@@ -1743,8 +1736,6 @@ void NativeGuestWorkqueueHostBlockExit() {
         return;
     }
     if (--nativeGuestWorkqueueHostBlockDepth == 0) {
-        nativeGuestRuntime->workqueueCompensationPending.store(
-            false, std::memory_order_release);
         nativeGuestRuntime->workqueueHostBlocked.store(
             false, std::memory_order_release);
     }

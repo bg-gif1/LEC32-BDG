@@ -197,7 +197,7 @@ bool Dynarmic_nativeInitialize() {
         config.always_little_endian = false;
         config.wall_clock_cntpct = true;
         config.check_halt_on_memory_access = true;
-        config.code_cache_size = 128 * 1024 * 1024;
+        config.code_cache_size = 96 * 1024 * 1024;
         config.optimizations &=
             ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
         

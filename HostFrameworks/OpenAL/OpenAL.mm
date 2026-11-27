@@ -45,6 +45,24 @@ std::unordered_map<void *, uint32_t> gDeviceTokens;
 std::unordered_map<void *, uint32_t> gContextTokens;
 std::atomic<uint32_t> gSilentCurrentContextToken{0};
 
+class OpenALGuestHostCallQuiescence {
+public:
+    OpenALGuestHostCallQuiescence()
+        : active_(Dynarmic_guest_host_call_quiescence_begin()) {}
+
+    ~OpenALGuestHostCallQuiescence() {
+        if (active_) Dynarmic_guest_host_call_quiescence_end();
+    }
+
+    OpenALGuestHostCallQuiescence(
+        const OpenALGuestHostCallQuiescence &) = delete;
+    OpenALGuestHostCallQuiescence &operator=(
+        const OpenALGuestHostCallQuiescence &) = delete;
+
+private:
+    bool active_;
+};
+
 static bool UseSilentSimulatorContext() {
     // Permit testing native Simulator audio after Apple fixes the RemoteIO
     // failure, and permit forcing the crash-safe path on other host setups.
@@ -806,10 +824,17 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
                 w[0] = 0;
                 break;
             }
-            ALCcontext *context = alcCreateContext(
-                device, attributes.empty() ? nullptr : attributes.data());
+            ALCcontext *context;
+            {
+                OpenALGuestHostCallQuiescence quiescence;
+                context = alcCreateContext(
+                    device, attributes.empty() ? nullptr : attributes.data());
+            }
             w[0] = RegisterHandle(context, HandleKind::Context);
-            if (context != nullptr && w[0] == 0) alcDestroyContext(context);
+            if (context != nullptr && w[0] == 0) {
+                OpenALGuestHostCallQuiescence quiescence;
+                alcDestroyContext(context);
+            }
             break;
         }
         case LC32_OPENAL_OP_alcMakeContextCurrent: {
@@ -824,28 +849,38 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
                 // calls have no current context and fail/no-op safely.
                 if (valid) gSilentCurrentContextToken.store(token);
                 w[0] = valid ? ALC_TRUE : ALC_FALSE;
+            } else if (valid) {
+                OpenALGuestHostCallQuiescence quiescence;
+                w[0] = alcMakeContextCurrent(context);
             } else {
-                w[0] = valid ? alcMakeContextCurrent(context) : ALC_FALSE;
+                w[0] = ALC_FALSE;
             }
             break;
         }
         case LC32_OPENAL_OP_alcProcessContext: {
             ALCcontext *context = ContextForToken(w[0], &valid);
-            if (!UseSilentSimulatorContext() && valid && context != nullptr)
+            if (!UseSilentSimulatorContext() && valid && context != nullptr) {
+                OpenALGuestHostCallQuiescence quiescence;
                 alcProcessContext(context);
+            }
             break;
         }
         case LC32_OPENAL_OP_alcSuspendContext: {
             ALCcontext *context = ContextForToken(w[0], &valid);
-            if (!UseSilentSimulatorContext() && valid && context != nullptr)
+            if (!UseSilentSimulatorContext() && valid && context != nullptr) {
+                OpenALGuestHostCallQuiescence quiescence;
                 alcSuspendContext(context);
+            }
             break;
         }
         case LC32_OPENAL_OP_alcDestroyContext: {
             const uint32_t token = w[0];
             ALCcontext *context = ContextForToken(token, &valid);
             if (valid && context != nullptr) {
-                alcDestroyContext(context);
+                {
+                    OpenALGuestHostCallQuiescence quiescence;
+                    alcDestroyContext(context);
+                }
                 ForgetHandle(token, HandleKind::Context);
                 if (UseSilentSimulatorContext()) {
                     uint32_t expected = token;
@@ -887,16 +922,26 @@ uint32_t LC32_OpenAL_Dispatch(uint32_t opcode, uint32_t guestPacket,
                 w[0] = 0;
                 break;
             }
-            ALCdevice *device = alcOpenDevice(hasName ? name.c_str() : nullptr);
+            ALCdevice *device;
+            {
+                OpenALGuestHostCallQuiescence quiescence;
+                device = alcOpenDevice(hasName ? name.c_str() : nullptr);
+            }
             w[0] = RegisterHandle(device, HandleKind::Device);
-            if (device != nullptr && w[0] == 0) alcCloseDevice(device);
+            if (device != nullptr && w[0] == 0) {
+                OpenALGuestHostCallQuiescence quiescence;
+                alcCloseDevice(device);
+            }
             break;
         }
         case LC32_OPENAL_OP_alcCloseDevice: {
             const uint32_t token = w[0];
             ALCdevice *device = DeviceForToken(token, &valid);
-            const ALCboolean result = valid && device != nullptr
-                ? alcCloseDevice(device) : ALC_FALSE;
+            ALCboolean result = ALC_FALSE;
+            if (valid && device != nullptr) {
+                OpenALGuestHostCallQuiescence quiescence;
+                result = alcCloseDevice(device);
+            }
             if (result == ALC_TRUE) ForgetHandle(token, HandleKind::Device);
             w[0] = result;
             break;
